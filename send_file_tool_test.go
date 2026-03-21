@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,40 +79,41 @@ func TestExecSendFile_noActiveJob(t *testing.T) {
 	}
 }
 
-func TestExecSendFile_mutuallyExclusive(t *testing.T) {
+func TestExecSendFile_pathRequired(t *testing.T) {
 	p := NewFeishuPlugin()
 	p.setActiveJob(&inboundJob{ChatID: "c"})
 	defer p.clearActiveJob()
 
 	_, err := p.execSendFile(context.Background(), `{}`)
-	if err == nil || !strings.Contains(err.Error(), "exactly one") {
-		t.Fatalf("got %v", err)
-	}
-	_, err = p.execSendFile(context.Background(), `{"path":"a","content_base64":"eA=="}`)
-	if err == nil || !strings.Contains(err.Error(), "exactly one") {
+	if err == nil || !strings.Contains(err.Error(), "path is required") {
 		t.Fatalf("got %v", err)
 	}
 }
 
-func TestExecSendFile_base64RequiresFilename(t *testing.T) {
+func TestExecSendFile_contentBase64Rejected(t *testing.T) {
 	p := NewFeishuPlugin()
 	p.setActiveJob(&inboundJob{ChatID: "c"})
 	defer p.clearActiveJob()
 
-	_, err := p.execSendFile(context.Background(), `{"content_base64":"`+base64.StdEncoding.EncodeToString([]byte("x"))+`"}`)
-	if err == nil || !strings.Contains(err.Error(), "filename") {
+	_, err := p.execSendFile(context.Background(), `{"content_base64":"Zg==","filename":"x.txt"}`)
+	if err == nil || !strings.Contains(err.Error(), "content_base64") {
 		t.Fatalf("got %v", err)
 	}
 }
 
-func TestExecSendFile_base64TooLarge(t *testing.T) {
+func TestExecSendFile_fileTooLarge(t *testing.T) {
 	p := NewFeishuPlugin()
 	p.cfg.SendFileMaxBytes = 10
+	root := t.TempDir()
+	p.cfg.SendFileRoot = root
 	p.setActiveJob(&inboundJob{ChatID: "c"})
 	defer p.clearActiveJob()
 
-	payload := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 20)))
-	_, err := p.execSendFile(context.Background(), `{"content_base64":"`+payload+`","filename":"big.bin"}`)
+	path := filepath.Join(root, "big.bin")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", 20)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := p.execSendFile(context.Background(), `{"path":"big.bin"}`)
 	if err == nil || !strings.Contains(err.Error(), "exceeds limit") {
 		t.Fatalf("got %v", err)
 	}

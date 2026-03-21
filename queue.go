@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
+
+	"github.com/seanly/dmr/pkg/plugin/proto"
 )
 
 // inboundJob is one user message to process serially on the global Feishu queue.
@@ -108,8 +111,54 @@ func (p *FeishuPlugin) processJob(job *inboundJob) {
 	} else {
 		out := resp.Output
 		if out == "" {
-			out = "(no output)"
+			out = feishuFallbackWhenNoText(job.TapeName, resp)
+			log.Printf("feishu: RunAgent empty output tape=%q steps=%d toolCalls=%d", job.TapeName, resp.Steps, len(resp.ToolCalls))
 		}
 		_ = p.replyAgentOutput(ctx, job, out)
 	}
+}
+
+// feishuFallbackWhenNoText explains empty agent Output: models sometimes finish with tool calls only
+// (e.g. after feishu.send_file). RunAgent still succeeds with Output==""; avoid a bare "(no output)".
+func feishuFallbackWhenNoText(tape string, resp *proto.RunAgentResponse) string {
+	if resp == nil {
+		return "(no output)"
+	}
+	if len(resp.ToolCalls) == 0 {
+		if resp.Steps > 0 {
+			return fmt.Sprintf(
+				"助手未返回可见文字（模型最后一轮可能为空）。本轮约 %d 步；请查 DMR tape「%s」或主机日志。若应交付报告，请确认已调用 feishu.send_file。",
+				resp.Steps, strings.TrimSpace(tape),
+			)
+		}
+		return "未产生助手回复（0 步）。请检查模型/API 是否报错或重试。"
+	}
+	var names []string
+	for _, tc := range resp.ToolCalls {
+		n := strings.TrimSpace(tc.Name)
+		if n != "" {
+			names = append(names, n)
+		}
+	}
+	if len(names) == 0 {
+		if resp.Steps > 0 {
+			return fmt.Sprintf("助手未返回文字；已记录 %d 步工具调用但无名称摘要，请查 tape。", resp.Steps)
+		}
+		return "(no output)"
+	}
+	const maxShow = 12
+	shown := names
+	ellipsis := ""
+	if len(names) > maxShow {
+		shown = names[:maxShow]
+		ellipsis = fmt.Sprintf(" …（共 %d 次工具调用）", len(names))
+	} else {
+		ellipsis = fmt.Sprintf("（共 %d 次）", len(names))
+	}
+	return fmt.Sprintf(
+		"本轮助手未输出文字，但已执行：%s%s。\n"+
+			"若包含 feishu.send_file，请在本对话中查看文件消息；其余请看工具返回或 tape。",
+		strings.Join(shown, ", "),
+		ellipsis,
+	)
 }

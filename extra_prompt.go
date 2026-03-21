@@ -8,10 +8,10 @@ const feishuInboundBuiltinSchedulingHint = `【飞书·定时】由 dmr-plugin-c
 
 [Cron/Feishu] Scheduled runs lack Feishu inbound context—assistant text is not auto-posted to IM. To deliver a message here, call feishu.send_text with tape_name matching this chat. For one-shot jobs, use run_once=true on cron.add.`
 
-// feishuInboundBuiltinReportHint tells the model to deliver reports as Markdown files via send_file (better than huge send_text).
-const feishuInboundBuiltinReportHint = `【飞书·交付】评估报告、扫描结果、长篇说明等「报告类」输出：请先把正文写成 UTF-8 的 **.md 文件**（可用 fs.write），再调用 **feishu.send_file** 上传该文件，让用户在飞书里打开/下载；不要用超长 **feishu.send_text** 硬塞全文。短回复、一句话结论仍可用 **feishu.send_text**（需要富文本时 markdown=true）。
+// feishuInboundBuiltinReportHint: all report-style deliverables must go as files (send_file), never as send_text body.
+const feishuInboundBuiltinReportHint = `【飞书·报告】凡是报告、分析、总结、评估、扫描结果、巡检说明、多段落技术说明等「报告类」交付：**一律**先把完整正文写成 UTF-8 的 **.md**（或 .txt/.pdf 等合适扩展名，优先 .md）文件（如 **fs.write**），再 **只** 用 **feishu.send_file** 的 **path** 发到飞书。**禁止**用 **feishu.send_text** 发送报告正文（无论长短）；send_text 仅用于非报告类短消息（如一句确认、链接、调度提醒，需要时用 markdown=true）。
 
-[Feishu delivery] For reports, assessments, or long write-ups: write Markdown to a **.md** file (e.g. fs.write) then **feishu.send_file** with that path—do not paste the full document into **feishu.send_text**. Brief replies may still use **feishu.send_text** (markdown=true when useful).`
+[Feishu reports] Any report-style output (analysis, summary, assessment, scan/dump, runbook-style explanation, multi-section write-up): **always** write the full body to a UTF-8 file (prefer **.md**, e.g. fs.write), then deliver **only** via **feishu.send_file** with **path**. **Do not** put report body in **feishu.send_text** (any length). Use **feishu.send_text** only for brief non-report messages (ack, link, reminders; markdown=true when useful).`
 
 // composeRunPrompt prefixes built-in hints, then optional user-configured extra (extra_prompt / file), then the inbound user text.
 // The combined string is what DMR records as the user tape entry.

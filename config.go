@@ -30,6 +30,10 @@ type FeishuConfig struct {
 	ExtraPrompt string `json:"extra_prompt"`
 	// ExtraPromptFile is UTF-8 text; relative paths resolve against ConfigBaseDir.
 	ExtraPromptFile string `json:"extra_prompt_file"`
+	// DmrRestartTrigger + DmrRestartToken: if token is non-empty, a p2p message whose first line is
+	// "<trigger> <token>" triggers host RestartHost (same as `dmr serve service restart`). Requires allow_from.
+	DmrRestartTrigger string `json:"dmr_restart_trigger"`
+	DmrRestartToken   string `json:"dmr_restart_token"`
 }
 
 func defaultFeishuConfig() FeishuConfig {

@@ -56,6 +56,10 @@ plugins:
       # extra_prompt: |
       #   When using cron reminders on this tape, always call feishu.send_text with tape_name.
       # extra_prompt_file: prompts/feishu_extra.md   # relative to ~/.dmr/ (config file directory)
+      # optional — restart DMR from Feishu (same as `dmr serve service restart` on the host)
+      # allow_from: ["ou_xxx"]                       # required when using dmr_restart_token
+      # dmr_restart_trigger: ",dmr-restart"          # default; first line of message must start with this
+      # dmr_restart_token: "long-random-secret"      # message: ",dmr-restart long-random-secret"
 ```
 
 Plugin `config` is passed through DMR as JSON; field names match the struct tags below. Legacy keys such as `group_trigger` in YAML are ignored if present in the JSON subset DMR sends.
@@ -75,11 +79,13 @@ Plugin `config` is passed through DMR as JSON; field names match the struct tags
 | `send_file_root` | If non-empty, `path` arguments must resolve under this absolute directory; if empty, paths are restricted to the plugin process **current working directory** at resolve time. |
 | `extra_prompt` | Optional multiline text. Combined with `extra_prompt_file` and **prefixed** to each **Feishu inbound** `RunAgent` prompt (before the real user message, separated by `---`). Not an extra LLM API `system` message — DMR still uses global `agent.system_prompt` for the system role. |
 | `extra_prompt_file` | Optional path to a UTF-8 file. **Relative paths** are resolved against DMR’s injected **`config_base_dir`** (the directory containing your main `config.yaml`). Loaded at plugin **Init**; content is placed **before** `extra_prompt` when both are set. |
+| `dmr_restart_trigger` | Prefix for the admin restart line (default `,dmr-restart`). Only the **first line** of the message is checked. |
+| `dmr_restart_token` | If non-empty, enables restart: send a p2p message whose first line is `<dmr_restart_trigger> <token>` to trigger **`dmr serve service restart`** on the DMR host. **Requires non-empty `allow_from`.** High risk — use a long random token. |
 
 ### Feishu-only extra prompt (limitations)
 
 - **Built-in scheduling hint**: Every Feishu inbound `RunAgent` automatically prepends a short fixed reminder (Chinese + English) that cron-triggered runs need **`feishu.send_text`** with **`tape_name`** to reach IM, and mentions **`run_once`**. This is not controlled by `extra_prompt`; it reduces silent mis-delivery when users ask for reminders.
-- **Built-in report delivery hint**: A second fixed prefix (Chinese + English) tells the model that **report-style** outputs (assessments, scan dumps, long write-ups) should be written as a **`.md` file** and sent with **`feishu.send_file`**, not pasted into a huge **`feishu.send_text`**. Short replies may still use **`feishu.send_text`** (`markdown=true` when useful). Also not controlled by `extra_prompt`.
+- **Built-in report delivery hint**: A second fixed prefix (Chinese + English) states that **all report-style** deliverables (analysis, summaries, assessments, scan dumps, etc.) must be written to a file and sent **only** via **`feishu.send_file`**; **`feishu.send_text` must not carry report body** (any length). **`feishu.send_text`** is for brief non-report messages only (`markdown=true` when useful). Not controlled by `extra_prompt`.
 - **Tape audit**: DMR records the **full** string passed to `RunAgent` as one `role=user` entry. The prefix (builtin + optional `extra_prompt`) appears in tape history, not only the raw Feishu text. For a cleaner transcript, rely more on DMR’s global **`system_prompt`**.
 - **Cron**: Jobs started by **`dmr-plugin-cron`** call the host directly; they **do not** go through this Feishu inbound prefix. Put instructions in the cron job **`prompt`** or in global **`system_prompt`**.
 - **External plugins** cannot register DMR’s `SystemPrompt` hook without host/proto changes; optional `extra_prompt` is an additional plugin-side supplement.
@@ -89,7 +95,7 @@ Plugin `config` is passed through DMR as JSON; field names match the struct tags
 The plugin registers **`feishu.send_file`** via `ProvideTools` / `CallTool` (same mechanism as other external-plugin tools).
 
 - **When it works**: Only while DMR is running the agent for a **Feishu-triggered** private-chat job (between `RunAgent` start and end). The tool sends to the same destination as normal agent replies (`reply_in_thread` when the user message was in a thread).
-- **Arguments**: Exactly one of **`path`** (local file) or **`content_base64`** (with required **`filename`**). Optional **`caption`** sends a plain-text line first.
+- **Arguments**: Required **`path`** (local file). Optional **`filename`** overrides the upload display name; optional **`caption`** sends a plain-text line first.
 - **Path safety**: Resolved paths must lie under `send_file_root` (if set) or under the process **CWD**; `..` escapes are rejected.
 - **OPA**: Treat like other sensitive outbound actions (e.g. `fs.write`): add or extend Rego so `feishu.send_file` is **`require_approval`** or **`deny`** by default in your policy bundle; the feishu plugin does not change DMR’s default `default.rego`.
 

@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,23 +16,20 @@ const maxSendFileNameRunes = 200
 // sendFileToolParamsJSON is the JSON Schema for feishu.send_file (validated further in code).
 func sendFileToolParamsJSON() string {
 	schema := map[string]any{
-		"type": "object",
+		"type":     "object",
+		"required": []string{"path"},
 		"properties": map[string]any{
 			"path": map[string]any{
 				"type":        "string",
-				"description": "Local file path (relative to send_file_root or process working directory). Mutually exclusive with content_base64.",
-			},
-			"filename": map[string]any{
-				"type":        "string",
-				"description": "Filename with extension for the upload. Required when using content_base64; defaults to basename of path when using path.",
-			},
-			"content_base64": map[string]any{
-				"type":        "string",
-				"description": "Standard base64 file content. Requires filename. Mutually exclusive with path.",
+				"description": "Local file path. Relative paths join send_file_root (if configured) or cwd; absolute paths must still lie under that root.",
 			},
 			"caption": map[string]any{
 				"type":        "string",
-				"description": "Optional short message sent as text before the file.",
+				"description": "Optional short text sent before the file.",
+			},
+			"filename": map[string]any{
+				"type":        "string",
+				"description": "Optional display/upload name with extension; default is basename of path.",
 			},
 		},
 	}
@@ -137,16 +132,17 @@ func (p *FeishuPlugin) execSendFile(ctx context.Context, argsJSON string) (map[s
 		return nil, fmt.Errorf("invalid tool arguments JSON: %w", err)
 	}
 
+	if argString(raw, "content_base64") != "" {
+		return nil, fmt.Errorf("content_base64 is not supported; write the file to disk (e.g. fs.write) and pass path")
+	}
+
 	pathStr := argString(raw, "path")
-	b64Str := argString(raw, "content_base64")
+	if pathStr == "" {
+		return nil, fmt.Errorf("path is required")
+	}
+
 	filenameArg := argString(raw, "filename")
 	caption := argString(raw, "caption")
-
-	hasPath := pathStr != ""
-	hasB64 := b64Str != ""
-	if hasPath == hasB64 {
-		return nil, fmt.Errorf("provide exactly one of path or content_base64")
-	}
 
 	maxBytes := p.cfg.sendFileMaxBytes()
 
@@ -154,54 +150,33 @@ func (p *FeishuPlugin) execSendFile(ctx context.Context, argsJSON string) (map[s
 		_ = p.sendTextToChat(ctx, job.ChatID, truncateRunes(caption, maxFeishuTextRunes))
 	}
 
-	var fileName string
-	var size int64
-	var key string
-	var err error
-
-	if hasPath {
-		abs, err := resolveSendFilePath(pathStr, p.cfg.SendFileRoot)
-		if err != nil {
-			return nil, err
-		}
-		fi, err := os.Stat(abs)
-		if err != nil {
-			return nil, fmt.Errorf("stat path: %w", err)
-		}
-		if fi.IsDir() {
-			return nil, fmt.Errorf("path is a directory, not a file")
-		}
-		if fi.Size() > maxBytes {
-			return nil, fmt.Errorf("file size %d exceeds limit %d bytes", fi.Size(), maxBytes)
-		}
-		f, err := os.Open(abs)
-		if err != nil {
-			return nil, fmt.Errorf("open file: %w", err)
-		}
-		defer f.Close()
-		if strings.TrimSpace(filenameArg) != "" {
-			fileName = sanitizeFileName(filenameArg)
-		} else {
-			fileName = sanitizeFileName(filepath.Base(abs))
-		}
-		size = fi.Size()
-		key, err = p.sendFileFromReader(ctx, job, fileName, io.LimitReader(f, fi.Size()))
-	} else {
-		if strings.TrimSpace(filenameArg) == "" {
-			return nil, fmt.Errorf("filename is required when using content_base64")
-		}
-		fileName = sanitizeFileName(filenameArg)
-		var decoded []byte
-		decoded, err = base64.StdEncoding.DecodeString(b64Str)
-		if err != nil {
-			return nil, fmt.Errorf("decode content_base64: %w", err)
-		}
-		if int64(len(decoded)) > maxBytes {
-			return nil, fmt.Errorf("decoded content size %d exceeds limit %d bytes", len(decoded), maxBytes)
-		}
-		size = int64(len(decoded))
-		key, err = p.sendFileFromReader(ctx, job, fileName, bytes.NewReader(decoded))
+	abs, err := resolveSendFilePath(pathStr, p.cfg.SendFileRoot)
+	if err != nil {
+		return nil, err
 	}
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return nil, fmt.Errorf("stat path: %w", err)
+	}
+	if fi.IsDir() {
+		return nil, fmt.Errorf("path is a directory, not a file")
+	}
+	if fi.Size() > maxBytes {
+		return nil, fmt.Errorf("file size %d exceeds limit %d bytes", fi.Size(), maxBytes)
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return nil, fmt.Errorf("open file: %w", err)
+	}
+	defer f.Close()
+
+	var fileName string
+	if strings.TrimSpace(filenameArg) != "" {
+		fileName = sanitizeFileName(filenameArg)
+	} else {
+		fileName = sanitizeFileName(filepath.Base(abs))
+	}
+	key, err := p.sendFileFromReader(ctx, job, fileName, io.LimitReader(f, fi.Size()))
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +184,7 @@ func (p *FeishuPlugin) execSendFile(ctx context.Context, argsJSON string) (map[s
 		"ok":        true,
 		"file_key":  key,
 		"filename":  fileName,
-		"size":      size,
+		"size":      fi.Size(),
 		"chat_id":   job.ChatID,
 		"in_thread": job.InThread,
 	}, nil

@@ -94,6 +94,9 @@ func (p *FeishuPlugin) Init(req *proto.InitRequest, resp *proto.InitResponse) er
 	if cfg.AppID == "" || cfg.AppSecret == "" {
 		return fmt.Errorf("feishu: app_id and app_secret are required")
 	}
+	if strings.TrimSpace(cfg.DmrRestartToken) != "" && len(cfg.AllowFrom) == 0 {
+		return fmt.Errorf("feishu: dmr_restart_token requires allow_from (restrict who can restart DMR)")
+	}
 
 	resolvedExtra, err := buildResolvedExtraPrompt(cfg)
 	if err != nil {
@@ -182,12 +185,12 @@ func (p *FeishuPlugin) ProvideTools(req *proto.ProvideToolsRequest, resp *proto.
 	resp.Tools = []proto.ToolDef{
 		{
 			Name:        "feishu.send_file",
-			Description: "Upload a file to Feishu and send it as a file message in the current private (p2p) chat. Only works when the agent run was triggered from Feishu. Provide exactly one of path (local file under allowed root) or content_base64 (with filename). Optional caption sends a text line first. Subject to send_file_max_bytes in plugin config (default 30 MiB).",
+			Description: "Required way to deliver reports in Feishu: upload a local file and send it as a file message in the current p2p chat. Only when this run was triggered from Feishu. Required: path to an existing file (write report body with fs.write first). Path resolves under send_file_root if set, else process cwd; must not escape that root. Optional filename overrides the upload name; optional caption sends a short text line first. Max size: send_file_max_bytes (default 30 MiB).",
 			ParametersJSON: sendFileToolParamsJSON(),
 		},
 		{
 			Name:        "feishu.send_text",
-			Description: "Send a text (or Markdown post) message to the current Feishu p2p chat when the run was triggered from Feishu. For runs without an active Feishu inbound context (e.g. cron calling RunAgent on a feishu:p2p tape), set tape_name to that tape (feishu:p2p:<chat_id>) or pass chat_id directly. Optional markdown=true uses rich post with Markdown. Do not set tape_name/chat_id together with a Feishu-triggered job.",
+			Description: "Send a short non-report text (or Markdown post) to the current Feishu p2p chat. Do not use for report/analysis/summary body—use feishu.send_file after writing a file. When the run was triggered from Feishu, omit tape_name/chat_id. For runs without inbound context (e.g. cron on feishu:p2p tape), set tape_name (feishu:p2p:<chat_id>) or chat_id. Optional markdown=true. Never set tape_name/chat_id together with a Feishu-triggered job.",
 			ParametersJSON: sendTextToolParamsJSON(),
 		},
 	}

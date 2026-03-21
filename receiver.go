@@ -64,6 +64,10 @@ func (p *FeishuPlugin) handleMessageReceive(ctx context.Context, event *larkim.P
 		return nil
 	}
 
+	if p.tryHandleDMRRestart(ctx, chatID, msgID, inThread, content) {
+		return nil
+	}
+
 	tape := tapeNameForP2P(chatID)
 	job := &inboundJob{
 		QueueKey:         tape,
