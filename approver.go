@@ -230,7 +230,7 @@ func formatApprovalArgsMarkdown(tool, argsJSON string, contentMaxRunes int) stri
 	switch tool {
 	case "shell":
 		return formatShellArgsMarkdown(args, contentMaxRunes, maxApprovalRestJSONRunes)
-	case "fs.write", "fs.edit":
+	case "fsWrite", "fsEdit":
 		return formatFsArgsMarkdown(args, contentMaxRunes, maxApprovalRestJSONRunes)
 	default:
 		return formatGenericArgsMarkdown(args, contentMaxRunes, maxApprovalRestJSONRunes)
@@ -443,7 +443,7 @@ func formatBatchCommandLine(index int, tool, argsJSON string, contentMaxRunes in
 		b.WriteString("```\n")
 		b.WriteString(truncateRunes(cmd, contentMaxRunes))
 		b.WriteString("\n```")
-	case "fs.write", "fs.edit":
+	case "fsWrite", "fsEdit":
 		path, _ := args["path"].(string)
 		fmt.Fprintf(&b, "`%s` — path: `%s`", tool, path)
 		if c, ok := args["content"].(string); ok && c != "" {

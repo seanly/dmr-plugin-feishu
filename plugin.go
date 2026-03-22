@@ -35,7 +35,7 @@ type FeishuPlugin struct {
 	approver *FeishuApprover
 	queues   *queueManager
 
-	// activeJob is set for the duration of callRunAgent in processJob so CallTool (e.g. feishu.send_file, feishu.send_text)
+	// activeJob is set for the duration of callRunAgent in processJob so CallTool (e.g. feishuSendFile, feishuSendText)
 	// can route to the current Feishu chat/thread. Nil when not inside RunAgent.
 	activeJobMu sync.Mutex
 	activeJob   *inboundJob
@@ -117,7 +117,7 @@ func (p *FeishuPlugin) Init(req *proto.InitRequest, resp *proto.InitResponse) er
 	}
 	log.Printf("feishu: init cfg vt_set=%v ek_set=%v allow_from=%d app_id_prefix=%q (p2p-only)",
 		vtSet, ekSet, len(cfg.AllowFrom), appIDPrefix)
-	log.Printf("feishu: tools (e.g. feishu.send_file, feishu.send_text) are registered when DMR first collects tools for an agent run (ProvideTools RPC), not during this Init")
+	log.Printf("feishu: tools (e.g. feishuSendFile, feishuSendText) are registered when DMR first collects tools for an agent run (ProvideTools RPC), not during this Init")
 
 	p.dedup = newDeduper(cfg.dedupTTL())
 	p.lc = lark.NewClient(cfg.AppID, cfg.AppSecret)
@@ -184,13 +184,13 @@ func (p *FeishuPlugin) RequestBatchApproval(req *proto.BatchApprovalRequest, res
 func (p *FeishuPlugin) ProvideTools(req *proto.ProvideToolsRequest, resp *proto.ProvideToolsResponse) error {
 	resp.Tools = []proto.ToolDef{
 		{
-			Name:        "feishu.send_file",
-			Description: "Required way to deliver reports in Feishu: upload a local file and send it as a file message in the current p2p chat. Only when this run was triggered from Feishu. Required: path to an existing file (write report body with fs.write first). Path resolves under send_file_root if set, else process cwd; must not escape that root. Optional filename overrides the upload name; optional caption sends a short text line first. Max size: send_file_max_bytes (default 30 MiB).",
+			Name:        "feishuSendFile",
+			Description: "Required way to deliver reports in Feishu: upload a local file and send it as a file message in the current p2p chat. Only when this run was triggered from Feishu. Required: path to an existing file (write report body with fsWrite first). Path resolves under send_file_root if set, else process cwd; must not escape that root. Optional filename overrides the upload name; optional caption sends a short text line first. Max size: send_file_max_bytes (default 30 MiB).",
 			ParametersJSON: sendFileToolParamsJSON(),
 		},
 		{
-			Name:        "feishu.send_text",
-			Description: "Send a short non-report text (or Markdown post) to the current Feishu p2p chat. Do not use for report/analysis/summary body—use feishu.send_file after writing a file. When the run was triggered from Feishu, omit tape_name/chat_id. For runs without inbound context (e.g. cron on feishu:p2p tape), set tape_name (feishu:p2p:<chat_id>) or chat_id. Optional markdown=true. Never set tape_name/chat_id together with a Feishu-triggered job.",
+			Name:        "feishuSendText",
+			Description: "Send a short non-report text (or Markdown post) to the current Feishu p2p chat. Do not use for report/analysis/summary body—use feishuSendFile after writing a file. When the run was triggered from Feishu, omit tape_name/chat_id. For runs without inbound context (e.g. cron on feishu:p2p tape), set tape_name (feishu:p2p:<chat_id>) or chat_id. Optional markdown=true. Never set tape_name/chat_id together with a Feishu-triggered job.",
 			ParametersJSON: sendTextToolParamsJSON(),
 		},
 	}
@@ -211,7 +211,7 @@ func (p *FeishuPlugin) CallTool(req *proto.CallToolRequest, resp *proto.CallTool
 	p.runMu.Unlock()
 
 	switch req.Name {
-	case "feishu.send_file":
+	case "feishuSendFile":
 		result, err := p.execSendFile(ctx, req.ArgsJSON)
 		if err != nil {
 			resp.Error = err.Error()
@@ -224,7 +224,7 @@ func (p *FeishuPlugin) CallTool(req *proto.CallToolRequest, resp *proto.CallTool
 		}
 		resp.ResultJSON = string(b)
 		return nil
-	case "feishu.send_text":
+	case "feishuSendText":
 		result, err := p.execSendText(ctx, req.ArgsJSON)
 		if err != nil {
 			resp.Error = err.Error()

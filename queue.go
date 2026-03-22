@@ -119,7 +119,7 @@ func (p *FeishuPlugin) processJob(job *inboundJob) {
 }
 
 // feishuFallbackWhenNoText explains empty agent Output: models sometimes finish with tool calls only
-// (e.g. after feishu.send_file). RunAgent still succeeds with Output==""; avoid a bare "(no output)".
+// (e.g. after feishuSendFile). RunAgent still succeeds with Output==""; avoid a bare "(no output)".
 func feishuFallbackWhenNoText(tape string, resp *proto.RunAgentResponse) string {
 	if resp == nil {
 		return "(no output)"
@@ -127,7 +127,7 @@ func feishuFallbackWhenNoText(tape string, resp *proto.RunAgentResponse) string 
 	if len(resp.ToolCalls) == 0 {
 		if resp.Steps > 0 {
 			return fmt.Sprintf(
-				"助手未返回可见文字（模型最后一轮可能为空）。本轮约 %d 步；请查 DMR tape「%s」或主机日志。若应交付报告，请确认已调用 feishu.send_file。",
+				"助手未返回可见文字（模型最后一轮可能为空）。本轮约 %d 步；请查 DMR tape「%s」或主机日志。若应交付报告，请确认已调用 feishuSendFile。",
 				resp.Steps, strings.TrimSpace(tape),
 			)
 		}
@@ -157,7 +157,7 @@ func feishuFallbackWhenNoText(tape string, resp *proto.RunAgentResponse) string 
 	}
 	return fmt.Sprintf(
 		"本轮助手未输出文字，但已执行：%s%s。\n"+
-			"若包含 feishu.send_file，请在本对话中查看文件消息；其余请看工具返回或 tape。",
+			"若包含 feishuSendFile，请在本对话中查看文件消息；其余请看工具返回或 tape。",
 		strings.Join(shown, ", "),
 		ellipsis,
 	)

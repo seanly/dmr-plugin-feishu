@@ -74,7 +74,7 @@ func argBool(m map[string]any, key string) bool {
 	}
 }
 
-// execSendText implements feishu.send_text for active Feishu jobs and for unattended runs (tape_name / chat_id).
+// execSendText implements feishuSendText for active Feishu jobs and for unattended runs (tape_name / chat_id).
 func (p *FeishuPlugin) execSendText(ctx context.Context, argsJSON string) (map[string]any, error) {
 	var raw map[string]any
 	if strings.TrimSpace(argsJSON) == "" {
@@ -122,7 +122,7 @@ func (p *FeishuPlugin) execSendText(ctx context.Context, argsJSON string) (map[s
 	case chatIDArg != "":
 		chatID = strings.TrimSpace(chatIDArg)
 	default:
-		return nil, fmt.Errorf("feishu.send_text requires tape_name (e.g. feishu:p2p:<chat_id>) or chat_id when not running from a Feishu-triggered job (e.g. scheduled cron on that tape)")
+		return nil, fmt.Errorf("feishuSendText requires tape_name (e.g. feishu:p2p:<chat_id>) or chat_id when not running from a Feishu-triggered job (e.g. scheduled cron on that tape)")
 	}
 
 	if err := p.deliverIMTextToP2PChat(ctx, chatID, text, markdown); err != nil {

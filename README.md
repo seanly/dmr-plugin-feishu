@@ -9,8 +9,8 @@ Chinese design notes: [`docs/implementation.md`](docs/implementation.md), [`docs
 - Go **1.25+** (matches DMR)
 - A checked-out **dmr** repo next to this one (see `go.mod` `replace`) or adjust the replace path
 - Feishu app with **WebSocket** mode / `im.message.receive_v1`, plus `app_id`, `app_secret`, `verification_token`, and (if used) `encrypt_key`
-- For **`feishu.send_file`**: enable the app permissions needed to **upload IM files** and **send file messages** (see Feishu open platform: IM message / file APIs for your app type)
-- For **`feishu.send_text`**: IM **create/send message** permissions for the bot (same family as normal agent replies to p2p chats)
+- For **`feishuSendFile`**: enable the app permissions needed to **upload IM files** and **send file messages** (see Feishu open platform: IM message / file APIs for your app type)
+- For **`feishuSendText`**: IM **create/send message** permissions for the bot (same family as normal agent replies to p2p chats)
 
 ## Build
 
@@ -49,12 +49,12 @@ plugins:
       allow_from: []                        # empty = all senders; else allowlist of user ids
       approval_timeout_sec: 300
       dedup_ttl_minutes: 10
-      # optional — feishu.send_file
+      # optional — feishuSendFile
       # send_file_max_bytes: 31457280   # default 30 MiB
       # send_file_root: "/safe/read-only/dir"  # if set, path args must stay under this dir
       # optional — Feishu-only instructions prepended to inbound RunAgent user message (see below)
       # extra_prompt: |
-      #   When using cron reminders on this tape, always call feishu.send_text with tape_name.
+      #   When using cron reminders on this tape, always call feishuSendText with tape_name.
       # extra_prompt_file: prompts/feishu_extra.md   # relative to ~/.dmr/ (config file directory)
       # optional — restart DMR from Feishu (same as `dmr serve service restart` on the host)
       # allow_from: ["ou_xxx"]                       # required when using dmr_restart_token
@@ -75,7 +75,7 @@ Plugin `config` is passed through DMR as JSON; field names match the struct tags
 | `allow_from` | Allowed sender IDs (`user_id` / `open_id` / `union_id` style strings). Empty = allow all. |
 | `approval_timeout_sec` | P2P text approval wait timeout (default `300`). |
 | `dedup_ttl_minutes` | Dedup window for `message_id` (default `10`). |
-| `send_file_max_bytes` | Max bytes for **`feishu.send_file`** uploads (default `31457280` = 30 MiB). |
+| `send_file_max_bytes` | Max bytes for **`feishuSendFile`** uploads (default `31457280` = 30 MiB). |
 | `send_file_root` | If non-empty, `path` arguments must resolve under this absolute directory; if empty, paths are restricted to the plugin process **current working directory** at resolve time. |
 | `extra_prompt` | Optional multiline text. Combined with `extra_prompt_file` and **prefixed** to each **Feishu inbound** `RunAgent` prompt (before the real user message, separated by `---`). Not an extra LLM API `system` message — DMR still uses global `agent.system_prompt` for the system role. |
 | `extra_prompt_file` | Optional path to a UTF-8 file. **Relative paths** are resolved against DMR’s injected **`config_base_dir`** (the directory containing your main `config.yaml`). Loaded at plugin **Init**; content is placed **before** `extra_prompt` when both are set. |
@@ -84,22 +84,22 @@ Plugin `config` is passed through DMR as JSON; field names match the struct tags
 
 ### Feishu-only extra prompt (limitations)
 
-- **Built-in scheduling hint**: Every Feishu inbound `RunAgent` automatically prepends a short fixed reminder (Chinese + English) that cron-triggered runs need **`feishu.send_text`** with **`tape_name`** to reach IM, and mentions **`run_once`**. This is not controlled by `extra_prompt`; it reduces silent mis-delivery when users ask for reminders.
-- **Built-in report delivery hint**: A second fixed prefix (Chinese + English) states that **all report-style** deliverables (analysis, summaries, assessments, scan dumps, etc.) must be written to a file and sent **only** via **`feishu.send_file`**; **`feishu.send_text` must not carry report body** (any length). **`feishu.send_text`** is for brief non-report messages only (`markdown=true` when useful). Not controlled by `extra_prompt`.
+- **Built-in scheduling hint**: Every Feishu inbound `RunAgent` automatically prepends a short fixed reminder (Chinese + English) that cron-triggered runs need **`feishuSendText`** with **`tape_name`** to reach IM, and mentions **`run_once`**. This is not controlled by `extra_prompt`; it reduces silent mis-delivery when users ask for reminders.
+- **Built-in report delivery hint**: A second fixed prefix (Chinese + English) states that **all report-style** deliverables (analysis, summaries, assessments, scan dumps, etc.) must be written to a file and sent **only** via **`feishuSendFile`**; **`feishuSendText` must not carry report body** (any length). **`feishuSendText`** is for brief non-report messages only (`markdown=true` when useful). Not controlled by `extra_prompt`.
 - **Tape audit**: DMR records the **full** string passed to `RunAgent` as one `role=user` entry. The prefix (builtin + optional `extra_prompt`) appears in tape history, not only the raw Feishu text. For a cleaner transcript, rely more on DMR’s global **`system_prompt`**.
 - **Cron**: Jobs started by **`dmr-plugin-cron`** call the host directly; they **do not** go through this Feishu inbound prefix. Put instructions in the cron job **`prompt`** or in global **`system_prompt`**.
 - **External plugins** cannot register DMR’s `SystemPrompt` hook without host/proto changes; optional `extra_prompt` is an additional plugin-side supplement.
 
-## Tool: `feishu.send_file`
+## Tool: `feishuSendFile`
 
-The plugin registers **`feishu.send_file`** via `ProvideTools` / `CallTool` (same mechanism as other external-plugin tools).
+The plugin registers **`feishuSendFile`** via `ProvideTools` / `CallTool` (same mechanism as other external-plugin tools).
 
 - **When it works**: Only while DMR is running the agent for a **Feishu-triggered** private-chat job (between `RunAgent` start and end). The tool sends to the same destination as normal agent replies (`reply_in_thread` when the user message was in a thread).
 - **Arguments**: Required **`path`** (local file). Optional **`filename`** overrides the upload display name; optional **`caption`** sends a plain-text line first.
 - **Path safety**: Resolved paths must lie under `send_file_root` (if set) or under the process **CWD**; `..` escapes are rejected.
-- **OPA**: Treat like other sensitive outbound actions (e.g. `fs.write`): add or extend Rego so `feishu.send_file` is **`require_approval`** or **`deny`** by default in your policy bundle; the feishu plugin does not change DMR’s default `default.rego`.
+- **OPA**: Treat like other sensitive outbound actions (e.g. `fsWrite`): add or extend Rego so `feishuSendFile` is **`require_approval`** or **`deny`** by default in your policy bundle; the feishu plugin does not change DMR’s default `default.rego`.
 
-## Tool: `feishu.send_text`
+## Tool: `feishuSendText`
 
 Sends a **plain text** or **Markdown (post)** message into a **p2p** chat. Use this when the model must push a message **before** the turn ends, or when **`RunAgent` was not started by Feishu** (e.g. **`dmr-plugin-cron`** on tape `feishu:p2p:<chat_id>`), where the host does not call the plugin’s `replyAgentOutput` for you.
 

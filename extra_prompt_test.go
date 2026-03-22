@@ -81,21 +81,21 @@ func TestComposeRunPrompt(t *testing.T) {
 	p := NewFeishuPlugin()
 	p.extraRunPrompt = ""
 	g := p.composeRunPrompt("hi")
-	if !strings.Contains(g, "feishu.send_text") || !strings.Contains(g, "feishu.send_file") || !strings.Contains(g, "User message:") || !strings.Contains(g, "hi") {
+	if !strings.Contains(g, "feishuSendText") || !strings.Contains(g, "feishuSendFile") || !strings.Contains(g, "User message:") || !strings.Contains(g, "hi") {
 		t.Fatalf("builtin+user: %q", g)
 	}
 	p.extraRunPrompt = "RULES"
 	g = p.composeRunPrompt("hi")
-	if !strings.Contains(g, "RULES") || !strings.Contains(g, "feishu.send_text") || !strings.Contains(g, "feishu.send_file") || !strings.Contains(g, "User message:") || !strings.Contains(g, "hi") {
+	if !strings.Contains(g, "RULES") || !strings.Contains(g, "feishuSendText") || !strings.Contains(g, "feishuSendFile") || !strings.Contains(g, "User message:") || !strings.Contains(g, "hi") {
 		t.Fatalf("builtin+config+user: %q", g)
 	}
 	g = p.composeRunPrompt("")
-	if !strings.Contains(g, "feishu.send_text") || !strings.Contains(g, "feishu.send_file") || !strings.Contains(g, "RULES") {
+	if !strings.Contains(g, "feishuSendText") || !strings.Contains(g, "feishuSendFile") || !strings.Contains(g, "RULES") {
 		t.Fatalf("empty user with config extra: %q", g)
 	}
 	p.extraRunPrompt = ""
 	g = p.composeRunPrompt("")
-	if !strings.Contains(g, "feishu.send_text") || !strings.Contains(g, "feishu.send_file") {
+	if !strings.Contains(g, "feishuSendText") || !strings.Contains(g, "feishuSendFile") {
 		t.Fatalf("empty user builtin only: %q", g)
 	}
 }

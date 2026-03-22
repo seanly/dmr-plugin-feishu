@@ -13,7 +13,7 @@ import (
 
 const maxSendFileNameRunes = 200
 
-// sendFileToolParamsJSON is the JSON Schema for feishu.send_file (validated further in code).
+// sendFileToolParamsJSON is the JSON Schema for feishuSendFile (validated further in code).
 func sendFileToolParamsJSON() string {
 	schema := map[string]any{
 		"type":     "object",
@@ -118,11 +118,11 @@ func resolveSendFilePath(pathStr, rootFromCfg string) (absPath string, err error
 	return pathAbs, nil
 }
 
-// execSendFile runs feishu.send_file using the active inbound job (Feishu-triggered RunAgent only).
+// execSendFile runs feishuSendFile using the active inbound job (Feishu-triggered RunAgent only).
 func (p *FeishuPlugin) execSendFile(ctx context.Context, argsJSON string) (map[string]any, error) {
 	job := p.getActiveJob()
 	if job == nil {
-		return nil, fmt.Errorf("feishu.send_file only works during a Feishu-triggered RunAgent (no active chat context)")
+		return nil, fmt.Errorf("feishuSendFile only works during a Feishu-triggered RunAgent (no active chat context)")
 	}
 
 	var raw map[string]any
@@ -133,7 +133,7 @@ func (p *FeishuPlugin) execSendFile(ctx context.Context, argsJSON string) (map[s
 	}
 
 	if argString(raw, "content_base64") != "" {
-		return nil, fmt.Errorf("content_base64 is not supported; write the file to disk (e.g. fs.write) and pass path")
+		return nil, fmt.Errorf("content_base64 is not supported; write the file to disk (e.g. fsWrite) and pass path")
 	}
 
 	pathStr := argString(raw, "path")

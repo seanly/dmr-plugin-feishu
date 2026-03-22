@@ -22,7 +22,7 @@ type FeishuConfig struct {
 	AllowFrom          []string `json:"allow_from"`
 	ApprovalTimeoutSec int      `json:"approval_timeout_sec"`
 	DedupTTLMinutes     int      `json:"dedup_ttl_minutes"`
-	// SendFileMaxBytes caps feishu.send_file uploads (default 30 MiB).
+	// SendFileMaxBytes caps feishuSendFile uploads (default 30 MiB).
 	SendFileMaxBytes int `json:"send_file_max_bytes"`
 	// SendFileRoot if set, path arguments must resolve under this directory (absolute recommended).
 	SendFileRoot string `json:"send_file_root"`
