@@ -11,6 +11,10 @@ func TestFeishuP2PTapeToChatID(t *testing.T) {
 	if err != nil || id != "oc_abc123" {
 		t.Fatalf("got %q err=%v", id, err)
 	}
+	id, err = feishuP2PTapeToChatID("feishu:p2p:oc_abc123:subagent")
+	if err != nil || id != "oc_abc123" {
+		t.Fatalf("subagent suffix: got %q err=%v", id, err)
+	}
 	_, err = feishuP2PTapeToChatID("")
 	if err == nil {
 		t.Fatal("expected error for empty")

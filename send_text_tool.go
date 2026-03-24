@@ -10,6 +10,7 @@ import (
 const feishuP2PTapePrefix = "feishu:p2p:"
 
 // feishuP2PTapeToChatID returns the chat_id from tape name "feishu:p2p:<chat_id>".
+// DMR subagent runs use "feishu:p2p:<chat_id>:subagent"; the ":subagent" suffix is stripped.
 func feishuP2PTapeToChatID(tapeName string) (string, error) {
 	s := strings.TrimSpace(tapeName)
 	if s == "" {
@@ -18,7 +19,7 @@ func feishuP2PTapeToChatID(tapeName string) (string, error) {
 	if !strings.HasPrefix(s, feishuP2PTapePrefix) {
 		return "", fmt.Errorf("tape_name must start with %q (got %q)", feishuP2PTapePrefix, tapeName)
 	}
-	id := strings.TrimSpace(s[len(feishuP2PTapePrefix):])
+	id := stripDMRSubagentChildTapeSuffix(s[len(feishuP2PTapePrefix):])
 	if id == "" {
 		return "", fmt.Errorf("tape_name %q has empty chat id after prefix", tapeName)
 	}

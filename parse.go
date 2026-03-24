@@ -45,6 +45,17 @@ func extractFeishuMessageContent(message *larkim.EventMessage) string {
 	return *message.Content
 }
 
+// dmrSubagentTapeSuffix is appended by DMR core to subagent child tapes (parent + ":subagent").
+const dmrSubagentTapeSuffix = ":subagent"
+
+// stripDMRSubagentChildTapeSuffix removes one trailing ":subagent" from the segment after "feishu:p2p:"
+// so Feishu receive_id matches the real p2p chat (e.g. oc_...) instead of "oc_...:subagent".
+func stripDMRSubagentChildTapeSuffix(tail string) string {
+	s := strings.TrimSpace(tail)
+	s = strings.TrimSuffix(s, dmrSubagentTapeSuffix)
+	return strings.TrimSpace(s)
+}
+
 // tapeNameForP2P builds the DMR tape name for private chat (p2p-only plugin).
 func tapeNameForP2P(chatID string) string {
 	return "feishu:p2p:" + chatID
@@ -55,5 +66,9 @@ func p2pChatIDFromTape(tape string) (chatID string, ok bool) {
 	if !strings.HasPrefix(tape, p) {
 		return "", false
 	}
-	return tape[len(p):], true
+	id := stripDMRSubagentChildTapeSuffix(tape[len(p):])
+	if id == "" {
+		return "", false
+	}
+	return id, true
 }

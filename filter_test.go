@@ -25,6 +25,10 @@ func TestP2PChatIDFromTape(t *testing.T) {
 	if !ok || id != "abc" {
 		t.Fatalf("got %q %v", id, ok)
 	}
+	id, ok = p2pChatIDFromTape("feishu:p2p:oc_e7ffa75937d58afcc895f0d2be28497f:subagent")
+	if !ok || id != "oc_e7ffa75937d58afcc895f0d2be28497f" {
+		t.Fatalf("subagent tape: got %q %v", id, ok)
+	}
 	_, ok = p2pChatIDFromTape("feishu:group:x:main")
 	if ok {
 		t.Fatal("expected false")
