@@ -144,6 +144,8 @@ func (p *FeishuPlugin) Init(req *proto.InitRequest, resp *proto.InitResponse) er
 		}
 	}()
 
+	p.scheduleInboundRetentionCleanup()
+
 	return nil
 }
 
