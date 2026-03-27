@@ -33,6 +33,7 @@ const (
 type feishuApprovalReply struct {
 	choice  int32
 	indices []int32
+	comment string
 }
 
 type approvalWait struct {
@@ -54,64 +55,85 @@ func newFeishuApprover(p *FeishuPlugin) *FeishuApprover {
 	}
 }
 
-func parseApprovalChoice(content string) (int32, bool) {
-	s := strings.TrimSpace(strings.ToLower(content))
+func parseApprovalChoice(content string) (int32, string, bool) {
+	// Split by "//" to separate choice from comment
+	choice, comment := splitByCommentMarker(content)
+	s := strings.TrimSpace(strings.ToLower(choice))
+
 	if s == "" {
-		return choiceDenied, true
+		return choiceDenied, comment, true
 	}
 	if utf8.RuneCountInString(s) == 1 {
 		switch s[0] {
 		case 'y':
-			return choiceApprovedOnce, true
+			return choiceApprovedOnce, comment, true
 		case 's':
-			return choiceApprovedSess, true
+			return choiceApprovedSess, comment, true
 		case 'a':
-			return choiceApprovedAlways, true
+			return choiceApprovedAlways, comment, true
 		case 'n':
-			return choiceDenied, true
+			return choiceDenied, comment, true
 		default:
-			return choiceDenied, true
+			return choiceDenied, comment, true
 		}
 	}
 	switch s {
 	case "yes":
-		return choiceApprovedOnce, true
+		return choiceApprovedOnce, comment, true
 	case "session":
-		return choiceApprovedSess, true
+		return choiceApprovedSess, comment, true
 	case "always":
-		return choiceApprovedAlways, true
+		return choiceApprovedAlways, comment, true
 	case "no":
-		return choiceDenied, true
+		return choiceDenied, comment, true
 	default:
-		return choiceDenied, true
+		return choiceDenied, comment, true
 	}
+}
+
+// splitByCommentMarker splits input by "//" into choice and comment.
+// Examples:
+//   "y // all good" -> ("y", "all good")
+//   "1,3 // approved" -> ("1,3", "approved")
+//   "n" -> ("n", "")
+func splitByCommentMarker(input string) (choice string, comment string) {
+	parts := strings.SplitN(input, "//", 2)
+	choice = strings.TrimSpace(parts[0])
+	if len(parts) > 1 {
+		comment = strings.TrimSpace(parts[1])
+	}
+	return
 }
 
 // parseBatchApprovalChoice mirrors plugins/cliapprover readBatchChoice: y/yes, s/session, a/always, n/no,
 // or comma-separated 1-based indices (e.g. 1,3,5). Empty or any other input denies (consumed), same safe default as CLI.
+// Also supports comments after "//": "n // security concern" or "1,3 // looks good".
 func parseBatchApprovalChoice(content string, total int) (feishuApprovalReply, bool) {
-	s := strings.TrimSpace(strings.ToLower(content))
+	// Split by "//" to separate choice from comment
+	choice, comment := splitByCommentMarker(content)
+	s := strings.TrimSpace(strings.ToLower(choice))
+
 	if s == "" {
-		return feishuApprovalReply{choice: choiceDenied}, true
+		return feishuApprovalReply{choice: choiceDenied, comment: comment}, true
 	}
 	switch s {
 	case "y", "yes":
-		return feishuApprovalReply{choice: choiceApprovedOnce}, true
+		return feishuApprovalReply{choice: choiceApprovedOnce, comment: comment}, true
 	case "s", "session":
-		return feishuApprovalReply{choice: choiceApprovedSess}, true
+		return feishuApprovalReply{choice: choiceApprovedSess, comment: comment}, true
 	case "a", "always":
-		return feishuApprovalReply{choice: choiceApprovedAlways}, true
+		return feishuApprovalReply{choice: choiceApprovedAlways, comment: comment}, true
 	case "n", "no":
-		return feishuApprovalReply{choice: choiceDenied}, true
+		return feishuApprovalReply{choice: choiceDenied, comment: comment}, true
 	}
 	if strings.Contains(s, ",") || isAllASCIIDigits(s) {
 		indices, err := parseApprovalIndices(s, total)
 		if err != nil {
-			return feishuApprovalReply{choice: choiceDenied}, true
+			return feishuApprovalReply{choice: choiceDenied, comment: comment}, true
 		}
-		return feishuApprovalReply{choice: choiceApprovedOnce, indices: indices}, true
+		return feishuApprovalReply{choice: choiceApprovedOnce, indices: indices, comment: comment}, true
 	}
-	return feishuApprovalReply{choice: choiceDenied}, true
+	return feishuApprovalReply{choice: choiceDenied, comment: comment}, true
 }
 
 func isAllASCIIDigits(s string) bool {
@@ -156,11 +178,11 @@ func (a *FeishuApprover) TryResolveP2P(chatID, content string) bool {
 
 	var reply feishuApprovalReply
 	if entry.batchN == 0 {
-		c, ok := parseApprovalChoice(content)
+		c, comment, ok := parseApprovalChoice(content)
 		if !ok {
 			return false
 		}
-		reply = feishuApprovalReply{choice: c}
+		reply = feishuApprovalReply{choice: c, comment: comment}
 	} else {
 		var ok bool
 		reply, ok = parseBatchApprovalChoice(content, entry.batchN)
@@ -344,11 +366,15 @@ func (a *FeishuApprover) handleSingle(req *proto.ApprovalRequest, resp *proto.Ap
 	b.WriteString("- **a** — approve always\n")
 	b.WriteString("- **n** — deny\n")
 	b.WriteString("\n*(Any other reply counts as **deny**.)*\n")
+	b.WriteString("\nYou can add a comment after `//`:\n")
+	b.WriteString("- Example: `n // security concern`\n")
+	b.WriteString("- Example: `y // looks safe`\n")
 
 	body := b.String()
 	reply := a.waitApproval(chatID, body, 0)
 	resp.Choice = reply.choice
-	if resp.Choice == choiceDenied {
+	resp.Comment = reply.comment
+	if resp.Choice == choiceDenied && resp.Comment == "" {
 		resp.Comment = "denied or timeout"
 	}
 }
@@ -411,9 +437,13 @@ func (a *FeishuApprover) handleBatch(req *proto.BatchApprovalRequest, resp *prot
 	b.WriteString("- **a** or **always** — always allow **all**\n")
 	b.WriteString("- **n** or **no** — deny **all**\n")
 	b.WriteString("\n*(Any other reply counts as **deny**.)*\n")
+	b.WriteString("\nYou can add a comment after `//`:\n")
+	b.WriteString("- Example: `n // security concern`\n")
+	b.WriteString("- Example: `1,3 // approved, others look risky`\n")
 
 	reply := a.waitApproval(chatID, b.String(), n)
 	resp.Choice = reply.choice
+	resp.Comment = reply.comment
 	if reply.indices != nil {
 		resp.Approved = reply.indices
 	} else {
