@@ -17,6 +17,8 @@ cross-build: tidy
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o $(BINARY)-linux-arm64 .
 	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -o $(BINARY)-darwin-amd64 .
 	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o $(BINARY)-darwin-arm64 .
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o $(BINARY)-windows-amd64.exe .
+	GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build -o $(BINARY)-windows-arm64.exe .
 
 install: build
 	mkdir -p $(INSTALL_DIR)
@@ -24,4 +26,4 @@ install: build
 	@echo "Installed to $(INSTALL_DIR)/$(BINARY)"
 
 clean:
-	rm -f $(BINARY) $(BINARY)-linux-amd64 $(BINARY)-linux-arm64 $(BINARY)-darwin-amd64 $(BINARY)-darwin-arm64
+	rm -f $(BINARY) $(BINARY)-linux-amd64 $(BINARY)-linux-arm64 $(BINARY)-darwin-amd64 $(BINARY)-darwin-arm64 $(BINARY)-windows-amd64.exe $(BINARY)-windows-arm64.exe
