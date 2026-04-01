@@ -52,8 +52,8 @@ func messageFromGetRespData(data *larkim.GetMessageRespData) *larkim.Message {
 	return nil
 }
 
-func (p *FeishuPlugin) fetchParentMessage(ctx context.Context, parentMessageID string) (*larkim.Message, error) {
-	if p.lc == nil {
+func (p *FeishuPlugin) fetchParentMessage(ctx context.Context, bot *BotInstance, parentMessageID string) (*larkim.Message, error) {
+	if bot.lc == nil {
 		return nil, fmt.Errorf("feishu client not initialized")
 	}
 	parentMessageID = strings.TrimSpace(parentMessageID)
@@ -67,7 +67,7 @@ func (p *FeishuPlugin) fetchParentMessage(ctx context.Context, parentMessageID s
 		MessageId(parentMessageID).
 		UserIdType(larkim.UserIdTypeGetMessageOpenId).
 		Build()
-	resp, err := p.lc.Im.V1.Message.Get(dctx, req)
+	resp, err := bot.lc.Im.V1.Message.Get(dctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +160,7 @@ func inboundUserContentOrEmptyFallback(userText string) string {
 }
 
 // mergeInboundReplyContext loads parent message when enabled and parent_id is set, then formats model content.
-func (p *FeishuPlugin) mergeInboundReplyContext(ctx context.Context, ev *larkim.EventMessage, userText string) string {
+func (p *FeishuPlugin) mergeInboundReplyContext(ctx context.Context, bot *BotInstance, ev *larkim.EventMessage, userText string) string {
 	if isCommaCommandMessage(userText) {
 		if pid := stringValue(ev.ParentId); pid != "" {
 			log.Printf("feishu: reply context skipped (comma command overrides quote) parentId=%q", pid)
@@ -175,7 +175,7 @@ func (p *FeishuPlugin) mergeInboundReplyContext(ctx context.Context, ev *larkim.
 		return inboundUserContentOrEmptyFallback(userText)
 	}
 
-	apiMsg, err := p.fetchParentMessage(ctx, parentID)
+	apiMsg, err := p.fetchParentMessage(ctx, bot, parentID)
 	if err != nil {
 		if errors.Is(err, errQuotedMessageDeleted) {
 			log.Printf("feishu: reply context parent deleted parentID=%q", parentID)
@@ -191,7 +191,7 @@ func (p *FeishuPlugin) mergeInboundReplyContext(ctx context.Context, ev *larkim.
 		return inboundUserContentOrEmptyFallback(userText)
 	}
 
-	parentBody := p.buildInboundUserContent(ctx, parentEv)
+	parentBody := p.buildInboundUserContent(ctx, bot, parentEv)
 	parentBody = strings.TrimSpace(parentBody)
 	if parentBody == "" {
 		return inboundUserContentOrEmptyFallback(userText)

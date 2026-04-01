@@ -44,13 +44,15 @@ type approvalWait struct {
 // FeishuApprover handles require_approval for private chat (feishu:p2p:*) tapes only.
 type FeishuApprover struct {
 	plugin *FeishuPlugin
+	bot    *BotInstance
 	mu     sync.Mutex
 	wait   map[string]*approvalWait // p2p chat_id -> wait state
 }
 
-func newFeishuApprover(p *FeishuPlugin) *FeishuApprover {
+func newFeishuApprover(p *FeishuPlugin, bot *BotInstance) *FeishuApprover {
 	return &FeishuApprover{
 		plugin: p,
+		bot:    bot,
 		wait:   make(map[string]*approvalWait),
 	}
 }
@@ -221,7 +223,7 @@ func (a *FeishuApprover) waitApproval(chatID, prompt string, batchN int) feishuA
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := a.plugin.sendApprovalMessageToChat(ctx, chatID, prompt); err != nil {
+	if err := a.bot.sendApprovalMessageToChat(ctx, chatID, prompt); err != nil {
 		return feishuApprovalReply{choice: choiceDenied}
 	}
 
@@ -328,11 +330,6 @@ func formatRemainingJSONMarkdown(args map[string]any, restJSONMaxRunes int) stri
 func (a *FeishuApprover) handleSingle(req *proto.ApprovalRequest, resp *proto.ApprovalResult) {
 	tape := strings.TrimSpace(req.Tape)
 	log.Printf("feishu: approver single tape=%q tool=%q", tape, req.Tool)
-	if !strings.HasPrefix(tape, "feishu:p2p:") {
-		resp.Choice = choiceDenied
-		resp.Comment = "approvals only supported for Feishu private chat (feishu:p2p:*)"
-		return
-	}
 	chatID, ok := p2pChatIDFromTape(tape)
 	log.Printf("feishu: approver single p2p_parse ok=%v chatID=%q", ok, chatID)
 	if !ok {
@@ -391,10 +388,6 @@ func (a *FeishuApprover) handleBatch(req *proto.BatchApprovalRequest, resp *prot
 			resp.Choice = choiceDenied
 			return
 		}
-	}
-	if !strings.HasPrefix(tape, "feishu:p2p:") {
-		resp.Choice = choiceDenied
-		return
 	}
 	chatID, ok := p2pChatIDFromTape(tape)
 	log.Printf("feishu: approver batch p2p_parse ok=%v chatID=%q", ok, chatID)

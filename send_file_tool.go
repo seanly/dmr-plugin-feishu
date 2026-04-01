@@ -68,6 +68,16 @@ func sanitizeFileName(name string) string {
 	return name
 }
 
+// expandTilde replaces a leading "~/" with the user's home directory.
+func expandTilde(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
+}
+
 // enforcePathUnderRoot returns an error if pathAbs is not under rootAbs.
 func enforcePathUnderRoot(pathAbs, rootAbs string) error {
 	rel, err := filepath.Rel(rootAbs, pathAbs)
@@ -80,8 +90,8 @@ func enforcePathUnderRoot(pathAbs, rootAbs string) error {
 	return nil
 }
 
-// resolveSendFilePath resolves user path against root (send_file_root or getwd) and checks containment.
-func resolveSendFilePath(pathStr, rootFromCfg string) (absPath string, err error) {
+// resolveSendFilePath resolves user path against root (send_file_root or workspace or getwd) and checks containment.
+func resolveSendFilePath(pathStr, rootFromCfg, workspace string) (absPath string, err error) {
 	pathStr = strings.TrimSpace(pathStr)
 	if pathStr == "" {
 		return "", fmt.Errorf("path is empty")
@@ -89,7 +99,10 @@ func resolveSendFilePath(pathStr, rootFromCfg string) (absPath string, err error
 	root := strings.TrimSpace(rootFromCfg)
 	var rootAbs string
 	if root != "" {
+		root = expandTilde(root)
 		rootAbs, err = filepath.Abs(filepath.Clean(root))
+	} else if workspace != "" {
+		rootAbs, err = filepath.Abs(filepath.Clean(workspace))
 	} else {
 		cwd, e := os.Getwd()
 		if e != nil {
@@ -147,10 +160,10 @@ func (p *FeishuPlugin) execSendFile(ctx context.Context, argsJSON string) (map[s
 	maxBytes := p.cfg.sendFileMaxBytes()
 
 	if caption != "" {
-		_ = p.sendTextToChat(ctx, job.ChatID, truncateRunes(caption, maxFeishuTextRunes))
+		_ = job.Bot.sendTextToChat(ctx, job.ChatID, truncateRunes(caption, maxFeishuTextRunes))
 	}
 
-	abs, err := resolveSendFilePath(pathStr, p.cfg.SendFileRoot)
+	abs, err := resolveSendFilePath(pathStr, p.cfg.SendFileRoot, p.cfg.Workspace)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +189,7 @@ func (p *FeishuPlugin) execSendFile(ctx context.Context, argsJSON string) (map[s
 	} else {
 		fileName = sanitizeFileName(filepath.Base(abs))
 	}
-	key, err := p.sendFileFromReader(ctx, job, fileName, io.LimitReader(f, fi.Size()))
+	key, err := job.Bot.sendFileFromReader(ctx, job, fileName, io.LimitReader(f, fi.Size()))
 	if err != nil {
 		return nil, err
 	}

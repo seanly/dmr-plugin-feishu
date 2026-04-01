@@ -26,8 +26,8 @@ func sanitizeMsgIDForFile(id string) string {
 	return id
 }
 
-func (p *FeishuPlugin) downloadMessageResource(ctx context.Context, msgID string, parsed ParsedInbound) (absPath string, savedName string, err error) {
-	if p.lc == nil {
+func (p *FeishuPlugin) downloadMessageResource(ctx context.Context, bot *BotInstance, msgID string, parsed ParsedInbound) (absPath string, savedName string, err error) {
+	if bot.lc == nil {
 		return "", "", fmt.Errorf("feishu client not initialized")
 	}
 	resType := messageResourceType(parsed)
@@ -44,7 +44,7 @@ func (p *FeishuPlugin) downloadMessageResource(ctx context.Context, msgID string
 		FileKey(key).
 		Type(resType).
 		Build()
-	resp, err := p.lc.Im.V1.MessageResource.Get(dctx, req)
+	resp, err := bot.lc.Im.V1.MessageResource.Get(dctx, req)
 	if err != nil {
 		return "", "", err
 	}
@@ -95,7 +95,7 @@ func (p *FeishuPlugin) downloadMessageResource(ctx context.Context, msgID string
 	return abs, name, nil
 }
 
-func (p *FeishuPlugin) inboundNonTextToPrompt(ctx context.Context, parsed ParsedInbound, msgID string) string {
+func (p *FeishuPlugin) inboundNonTextToPrompt(ctx context.Context, bot *BotInstance, parsed ParsedInbound, msgID string) string {
 	if parsed.MsgType == larkim.MsgTypePost {
 		var b strings.Builder
 		b.WriteString("[Feishu inbound — msg_type=post]\n")
@@ -127,7 +127,7 @@ func (p *FeishuPlugin) inboundNonTextToPrompt(ctx context.Context, parsed Parsed
 		return strings.TrimSpace(b.String())
 	}
 
-	path, _, err := p.downloadMessageResource(ctx, msgID, parsed)
+	path, _, err := p.downloadMessageResource(ctx, bot, msgID, parsed)
 	if err != nil {
 		fmt.Fprintf(&b, "status: download_failed\nreason: %v\n", err)
 		return strings.TrimSpace(b.String())
@@ -137,7 +137,7 @@ func (p *FeishuPlugin) inboundNonTextToPrompt(ctx context.Context, parsed Parsed
 	return strings.TrimSpace(b.String())
 }
 
-func (p *FeishuPlugin) buildInboundUserContent(ctx context.Context, message *larkim.EventMessage) string {
+func (p *FeishuPlugin) buildInboundUserContent(ctx context.Context, bot *BotInstance, message *larkim.EventMessage) string {
 	parsed := parseFeishuInboundMessage(message)
 	msgID := stringValue(message.MessageId)
 
@@ -152,7 +152,7 @@ func (p *FeishuPlugin) buildInboundUserContent(ctx context.Context, message *lar
 		return ""
 	}
 	if parsed.MsgType != "" {
-		return p.inboundNonTextToPrompt(ctx, parsed, msgID)
+		return p.inboundNonTextToPrompt(ctx, bot, parsed, msgID)
 	}
 	if strings.TrimSpace(parsed.RawContent) != "" {
 		return fmt.Sprintf("[Feishu inbound — msg_type unknown]\n%s", parsed.RawContent)

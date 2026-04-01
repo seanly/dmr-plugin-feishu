@@ -98,7 +98,7 @@ func (p *FeishuPlugin) execSendText(ctx context.Context, argsJSON string) (map[s
 		if tapeName != "" || chatIDArg != "" {
 			return nil, fmt.Errorf("do not set tape_name or chat_id during a Feishu-triggered RunAgent; the active private chat is used automatically")
 		}
-		if err := p.deliverIMTextForJob(ctx, job, text, markdown); err != nil {
+		if err := job.Bot.deliverIMTextForJob(ctx, job, text, markdown); err != nil {
 			return nil, err
 		}
 		return map[string]any{
@@ -126,7 +126,12 @@ func (p *FeishuPlugin) execSendText(ctx context.Context, argsJSON string) (map[s
 		return nil, fmt.Errorf("feishuSendText requires tape_name (e.g. feishu:p2p:<chat_id>) or chat_id when not running from a Feishu-triggered job (e.g. scheduled cron on that tape)")
 	}
 
-	if err := p.deliverIMTextToP2PChat(ctx, chatID, text, markdown); err != nil {
+	bot, err := p.getBotForChat(chatID)
+	if err != nil {
+		return nil, fmt.Errorf("feishuSendText: %w (chat_id=%q; bot routing is established when the user first messages the bot)", err, chatID)
+	}
+
+	if err := bot.deliverIMTextToP2PChat(ctx, chatID, text, markdown); err != nil {
 		return nil, err
 	}
 	return map[string]any{

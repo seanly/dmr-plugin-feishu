@@ -46,14 +46,11 @@ func buildFeishuPostMarkdownContent(markdown string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// For IM "post" messages, `content` should be a JSON string of the form:
-	//   {"zh_cn":{"title":"...","content":[... ]}}
-	// The lark SDK will escape this JSON string for the HTTP request body.
 	return innerStr, nil
 }
 
-func (p *FeishuPlugin) sendTextToChat(ctx context.Context, chatID, text string) error {
-	if p.lc == nil {
+func (b *BotInstance) sendTextToChat(ctx context.Context, chatID, text string) error {
+	if b.lc == nil {
 		return fmt.Errorf("feishu client not initialized")
 	}
 	payload, err := json.Marshal(map[string]string{"text": truncateRunes(text, maxFeishuTextRunes)})
@@ -69,7 +66,7 @@ func (p *FeishuPlugin) sendTextToChat(ctx context.Context, chatID, text string) 
 			Uuid(fmt.Sprintf("dmr-feishu-%d", time.Now().UnixNano())).
 			Build()).
 		Build()
-	resp, err := p.lc.Im.V1.Message.Create(ctx, req)
+	resp, err := b.lc.Im.V1.Message.Create(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -81,8 +78,8 @@ func (p *FeishuPlugin) sendTextToChat(ctx context.Context, chatID, text string) 
 
 // sendMarkdownPostToChat sends msg_type=post with a single zh_cn "md" node (standard Markdown).
 // Caller should cap markdown length if needed; this does not truncate.
-func (p *FeishuPlugin) sendMarkdownPostToChat(ctx context.Context, chatID, markdown string) error {
-	if p.lc == nil {
+func (b *BotInstance) sendMarkdownPostToChat(ctx context.Context, chatID, markdown string) error {
+	if b.lc == nil {
 		return fmt.Errorf("feishu client not initialized")
 	}
 	postContent, err := buildFeishuPostMarkdownContent(markdown)
@@ -99,7 +96,7 @@ func (p *FeishuPlugin) sendMarkdownPostToChat(ctx context.Context, chatID, markd
 			Uuid(uuid).
 			Build()).
 		Build()
-	resp, err := p.lc.Im.V1.Message.Create(ctx, req)
+	resp, err := b.lc.Im.V1.Message.Create(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -110,24 +107,24 @@ func (p *FeishuPlugin) sendMarkdownPostToChat(ctx context.Context, chatID, markd
 }
 
 // sendApprovalMessageToChat tries post+md first, then falls back to plain text.
-func (p *FeishuPlugin) sendApprovalMessageToChat(ctx context.Context, chatID, markdown string) error {
+func (b *BotInstance) sendApprovalMessageToChat(ctx context.Context, chatID, markdown string) error {
 	md := truncateRunes(markdown, maxFeishuApprovalMarkdownRunes)
-	if err := p.sendMarkdownPostToChat(ctx, chatID, md); err != nil {
+	if err := b.sendMarkdownPostToChat(ctx, chatID, md); err != nil {
 		log.Printf("feishu: approval post/md failed, fallback text: %v", err)
-		return p.sendTextToChat(ctx, chatID, md)
+		return b.sendTextToChat(ctx, chatID, md)
 	}
 	return nil
 }
 
 func (p *FeishuPlugin) replyAgentOutput(ctx context.Context, job *inboundJob, output string) error {
 	text := truncateRunes(output, maxFeishuTextRunes)
-	return p.deliverIMTextForJob(ctx, job, text, true)
+	return job.Bot.deliverIMTextForJob(ctx, job, text, true)
 }
 
 // deliverIMTextForJob sends text to the same destination as replyAgentOutput (thread vs main chat).
 // preferMarkdown: when true, try Feishu post+md first then plain text; when false, send plain text only.
-func (p *FeishuPlugin) deliverIMTextForJob(ctx context.Context, job *inboundJob, text string, preferMarkdown bool) error {
-	if p.lc == nil {
+func (b *BotInstance) deliverIMTextForJob(ctx context.Context, job *inboundJob, text string, preferMarkdown bool) error {
+	if b.lc == nil {
 		return fmt.Errorf("feishu client not initialized")
 	}
 	if job == nil {
@@ -152,7 +149,7 @@ func (p *FeishuPlugin) deliverIMTextForJob(ctx context.Context, job *inboundJob,
 				MessageId(job.TriggerMessageID).
 				Body(body).
 				Build()
-			resp, err := p.lc.Im.V1.Message.Reply(ctx, req)
+			resp, err := b.lc.Im.V1.Message.Reply(ctx, req)
 			if err != nil {
 				return err
 			}
@@ -174,7 +171,7 @@ func (p *FeishuPlugin) deliverIMTextForJob(ctx context.Context, job *inboundJob,
 				MessageId(job.TriggerMessageID).
 				Body(body).
 				Build()
-			resp, err := p.lc.Im.V1.Message.Reply(ctx, req)
+			resp, err := b.lc.Im.V1.Message.Reply(ctx, req)
 			if err == nil && resp != nil && resp.Success() {
 				return nil
 			}
@@ -195,7 +192,7 @@ func (p *FeishuPlugin) deliverIMTextForJob(ctx context.Context, job *inboundJob,
 			MessageId(job.TriggerMessageID).
 			Body(body).
 			Build()
-		resp, err := p.lc.Im.V1.Message.Reply(ctx, req)
+		resp, err := b.lc.Im.V1.Message.Reply(ctx, req)
 		if err != nil {
 			return err
 		}
@@ -215,7 +212,7 @@ func (p *FeishuPlugin) deliverIMTextForJob(ctx context.Context, job *inboundJob,
 				Uuid(uuid).
 				Build()).
 			Build()
-		resp, err := p.lc.Im.V1.Message.Create(ctx, req)
+		resp, err := b.lc.Im.V1.Message.Create(ctx, req)
 		if err != nil {
 			return err
 		}
@@ -237,7 +234,7 @@ func (p *FeishuPlugin) deliverIMTextForJob(ctx context.Context, job *inboundJob,
 				Uuid(uuid).
 				Build()).
 			Build()
-		resp, err := p.lc.Im.V1.Message.Create(ctx, req)
+		resp, err := b.lc.Im.V1.Message.Create(ctx, req)
 		if err == nil && resp != nil && resp.Success() {
 			return nil
 		}
@@ -257,7 +254,7 @@ func (p *FeishuPlugin) deliverIMTextForJob(ctx context.Context, job *inboundJob,
 			Uuid(uuid).
 			Build()).
 		Build()
-	resp, err := p.lc.Im.V1.Message.Create(ctx, req)
+	resp, err := b.lc.Im.V1.Message.Create(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -269,19 +266,19 @@ func (p *FeishuPlugin) deliverIMTextForJob(ctx context.Context, job *inboundJob,
 
 // deliverIMTextToP2PChat sends a new message to a p2p chat by chat_id (no thread context).
 // Used when RunAgent was not triggered from Feishu (e.g. cron) so there is no active inboundJob.
-func (p *FeishuPlugin) deliverIMTextToP2PChat(ctx context.Context, chatID, text string, preferMarkdown bool) error {
+func (b *BotInstance) deliverIMTextToP2PChat(ctx context.Context, chatID, text string, preferMarkdown bool) error {
 	if strings.TrimSpace(chatID) == "" {
 		return fmt.Errorf("feishu: empty chat_id")
 	}
 	if preferMarkdown {
 		md := truncateRunes(text, maxFeishuTextRunes)
-		if err := p.sendMarkdownPostToChat(ctx, chatID, md); err != nil {
+		if err := b.sendMarkdownPostToChat(ctx, chatID, md); err != nil {
 			log.Printf("feishu: send_text post/md failed, fallback text: %v", err)
-			return p.sendTextToChat(ctx, chatID, md)
+			return b.sendTextToChat(ctx, chatID, md)
 		}
 		return nil
 	}
-	return p.sendTextToChat(ctx, chatID, text)
+	return b.sendTextToChat(ctx, chatID, text)
 }
 
 func truncateRunes(s string, maxRunes int) string {

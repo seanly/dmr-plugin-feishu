@@ -6,16 +6,18 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/seanly/dmr/pkg/plugin/proto"
 )
 
-// inboundJob is one user message to process serially on the global Feishu queue.
+// inboundJob is one user message to process serially per chat_id.
 type inboundJob struct {
 	QueueKey string // same as TapeName; kept for logs
 	TapeName string
 
 	ChatID           string
+	Bot              *BotInstance // the bot instance that received this message
 	SenderID         string
 	Content          string
 	TriggerMessageID string
@@ -25,55 +27,102 @@ type inboundJob struct {
 }
 
 type queueManager struct {
-	plugin        *FeishuPlugin
-	mu            sync.Mutex
-	jobs          chan *inboundJob
-	workerStarted bool
+	plugin *FeishuPlugin
+
+	mu      sync.Mutex
+	workers map[string]chan *inboundJob // chat_id -> per-chat job channel
+	closed  bool
+	wg      sync.WaitGroup
 }
 
 func newQueueManager(p *FeishuPlugin) *queueManager {
 	return &queueManager{
-		plugin: p,
-		jobs:   make(chan *inboundJob, 64),
+		plugin:  p,
+		workers: make(map[string]chan *inboundJob),
 	}
 }
 
 func (qm *queueManager) enqueue(job *inboundJob) {
-	if job == nil || job.TapeName == "" {
+	if job == nil || job.ChatID == "" {
 		return
 	}
+
 	qm.mu.Lock()
-	if qm.jobs == nil {
+	if qm.closed {
 		qm.mu.Unlock()
 		return
 	}
-	if !qm.workerStarted {
-		qm.workerStarted = true
-		go qm.plugin.runWorker(qm.jobs)
+
+	ch, exists := qm.workers[job.ChatID]
+	if !exists {
+		ch = make(chan *inboundJob, 16)
+		qm.workers[job.ChatID] = ch
+		qm.wg.Add(1)
+		go qm.runWorkerForChat(job.ChatID, ch)
+		log.Printf("feishu: queue worker started for chat_id=%q", job.ChatID)
 	}
-	ch := qm.jobs
 	qm.mu.Unlock()
-	ch <- job
-}
 
-func (qm *queueManager) shutdown() {
-	qm.mu.Lock()
-	defer qm.mu.Unlock()
-	if qm.jobs != nil {
-		close(qm.jobs)
-		qm.jobs = nil
-		qm.workerStarted = false
+	select {
+	case ch <- job:
+	default:
+		log.Printf("feishu: queue full for chat_id=%q, dropping job", job.ChatID)
 	}
 }
 
-func (p *FeishuPlugin) runWorker(jobs <-chan *inboundJob) {
-	for job := range jobs {
-		if job != nil {
-			log.Printf("feishu: worker job tape=%q chatID=%q inThread=%v msgID=%q preview=%q",
-				job.TapeName, job.ChatID, job.InThread, job.TriggerMessageID, job.Content)
+func (qm *queueManager) runWorkerForChat(chatID string, jobs <-chan *inboundJob) {
+	defer qm.wg.Done()
+	defer func() {
+		qm.mu.Lock()
+		delete(qm.workers, chatID)
+		qm.mu.Unlock()
+		log.Printf("feishu: queue worker stopped for chat_id=%q", chatID)
+	}()
+
+	idleTimeout := 5 * time.Minute
+	timer := time.NewTimer(idleTimeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case job, ok := <-jobs:
+			if !ok {
+				return
+			}
+			if job != nil {
+				log.Printf("feishu: worker processing chat_id=%q tape=%q msgID=%q",
+					chatID, job.TapeName, job.TriggerMessageID)
+				qm.plugin.processJob(job)
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(idleTimeout)
+
+		case <-timer.C:
+			log.Printf("feishu: queue worker idle timeout for chat_id=%q", chatID)
+			return
 		}
-		p.processJob(job)
 	}
+}
+
+func (qm *queueManager) shutdownAll() {
+	qm.mu.Lock()
+	if qm.closed {
+		qm.mu.Unlock()
+		return
+	}
+	qm.closed = true
+	for chatID, ch := range qm.workers {
+		close(ch)
+		log.Printf("feishu: closing queue worker for chat_id=%q", chatID)
+	}
+	qm.mu.Unlock()
+	qm.wg.Wait()
+	log.Printf("feishu: all queue workers stopped")
 }
 
 func (p *FeishuPlugin) processJob(job *inboundJob) {

@@ -84,6 +84,9 @@ func TestExecSendText_activeJobWithTapeNameRejected(t *testing.T) {
 
 func TestExecSendText_noClientWithTarget(t *testing.T) {
 	p := NewFeishuPlugin()
+	// Register a bot with nil lc for the chat
+	bot := &BotInstance{}
+	p.registerChatRoute("oc_1", bot)
 	// Valid args but lc is nil -> deliver fails
 	_, err := p.execSendText(context.Background(), `{"text":"hi","tape_name":"feishu:p2p:oc_1"}`)
 	if err == nil || !strings.Contains(err.Error(), "client not initialized") {
@@ -93,7 +96,8 @@ func TestExecSendText_noClientWithTarget(t *testing.T) {
 
 func TestExecSendText_activeJobNoClient(t *testing.T) {
 	p := NewFeishuPlugin()
-	p.setActiveJob(&inboundJob{ChatID: "oc_x"})
+	bot := &BotInstance{} // nil lc
+	p.setActiveJob(&inboundJob{ChatID: "oc_x", Bot: bot})
 	defer p.clearActiveJob()
 
 	_, err := p.execSendText(context.Background(), `{"text":"hello"}`)

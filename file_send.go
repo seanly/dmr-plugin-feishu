@@ -12,8 +12,8 @@ import (
 )
 
 // uploadFileToFeishu uploads bytes as a generic stream file and returns file_key.
-func (p *FeishuPlugin) uploadFileToFeishu(ctx context.Context, fileName string, r io.Reader) (string, error) {
-	if p.lc == nil {
+func (b *BotInstance) uploadFileToFeishu(ctx context.Context, fileName string, r io.Reader) (string, error) {
+	if b.lc == nil {
 		return "", fmt.Errorf("feishu client not initialized")
 	}
 	body := larkim.NewCreateFileReqBodyBuilder().
@@ -24,7 +24,7 @@ func (p *FeishuPlugin) uploadFileToFeishu(ctx context.Context, fileName string, 
 	req := larkim.NewCreateFileReqBuilder().
 		Body(body).
 		Build()
-	resp, err := p.lc.Im.V1.File.Create(ctx, req)
+	resp, err := b.lc.Im.V1.File.Create(ctx, req)
 	if err != nil {
 		return "", err
 	}
@@ -38,8 +38,8 @@ func (p *FeishuPlugin) uploadFileToFeishu(ctx context.Context, fileName string, 
 }
 
 // sendFileForJob sends msg_type=file to the same destination as replyAgentOutput (thread reply vs chat create).
-func (p *FeishuPlugin) sendFileForJob(ctx context.Context, job *inboundJob, fileKey string) error {
-	if p.lc == nil {
+func (b *BotInstance) sendFileForJob(ctx context.Context, job *inboundJob, fileKey string) error {
+	if b.lc == nil {
 		return fmt.Errorf("feishu client not initialized")
 	}
 	payload, err := json.Marshal(map[string]string{"file_key": fileKey})
@@ -60,7 +60,7 @@ func (p *FeishuPlugin) sendFileForJob(ctx context.Context, job *inboundJob, file
 			MessageId(job.TriggerMessageID).
 			Body(body).
 			Build()
-		resp, err := p.lc.Im.V1.Message.Reply(ctx, req)
+		resp, err := b.lc.Im.V1.Message.Reply(ctx, req)
 		if err != nil {
 			return err
 		}
@@ -79,7 +79,7 @@ func (p *FeishuPlugin) sendFileForJob(ctx context.Context, job *inboundJob, file
 			Uuid(uuid).
 			Build()).
 		Build()
-	resp, err := p.lc.Im.V1.Message.Create(ctx, req)
+	resp, err := b.lc.Im.V1.Message.Create(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -90,12 +90,12 @@ func (p *FeishuPlugin) sendFileForJob(ctx context.Context, job *inboundJob, file
 }
 
 // sendFileFromReader uploads then sends file to the active Feishu session.
-func (p *FeishuPlugin) sendFileFromReader(ctx context.Context, job *inboundJob, fileName string, r io.Reader) (fileKey string, err error) {
-	key, err := p.uploadFileToFeishu(ctx, fileName, r)
+func (b *BotInstance) sendFileFromReader(ctx context.Context, job *inboundJob, fileName string, r io.Reader) (fileKey string, err error) {
+	key, err := b.uploadFileToFeishu(ctx, fileName, r)
 	if err != nil {
 		return "", err
 	}
-	if err := p.sendFileForJob(ctx, job, key); err != nil {
+	if err := b.sendFileForJob(ctx, job, key); err != nil {
 		log.Printf("feishu: file message send failed after upload file_key=%q: %v", key, err)
 		return "", err
 	}

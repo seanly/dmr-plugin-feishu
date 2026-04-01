@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -17,12 +18,63 @@ const (
 	defaultInboundReplyContextMaxRunes   = 8000
 )
 
+// BotConfig holds configuration for a single Feishu bot instance.
+type BotConfig struct {
+	AppID             string   `json:"app_id"`
+	AppSecret         string   `json:"app_secret"`
+	VerificationToken string   `json:"verification_token"`
+	EncryptKey        string   `json:"encrypt_key"`
+	AllowFrom         []string `json:"allow_from"`
+}
+
+// parseSize parses human-readable size strings like "200MB", "50M", "1GB" to bytes.
+// Also accepts plain numbers as bytes.
+func parseSize(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+
+	// Try parsing as plain number first
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return n, nil
+	}
+
+	// Parse with unit suffix
+	s = strings.ToUpper(s)
+	var multiplier int64 = 1
+
+	if strings.HasSuffix(s, "KB") || strings.HasSuffix(s, "K") {
+		multiplier = 1024
+		s = strings.TrimSuffix(strings.TrimSuffix(s, "KB"), "K")
+	} else if strings.HasSuffix(s, "MB") || strings.HasSuffix(s, "M") {
+		multiplier = 1024 * 1024
+		s = strings.TrimSuffix(strings.TrimSuffix(s, "MB"), "M")
+	} else if strings.HasSuffix(s, "GB") || strings.HasSuffix(s, "G") {
+		multiplier = 1024 * 1024 * 1024
+		s = strings.TrimSuffix(strings.TrimSuffix(s, "GB"), "G")
+	}
+
+	n, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size format: %s", s)
+	}
+
+	return int64(n * float64(multiplier)), nil
+}
+
 // FeishuConfig is loaded from the plugin InitRequest.ConfigJSON (YAML becomes map then JSON in DMR).
 type FeishuConfig struct {
 	// ConfigBaseDir is injected by DMR (absolute directory of the main config file). Used to resolve relative extra_prompt_file paths.
 	ConfigBaseDir string `json:"config_base_dir"`
 	// Workspace is injected by DMR (same absolute path as fs/shell tools). Used for inbound media storage.
 	Workspace string `json:"workspace"`
+
+	// Bots holds one or more Feishu bot instances. When empty, legacy single-bot
+	// fields (AppID/AppSecret/…) are converted into Bots[0] for backward compat.
+	Bots []BotConfig `json:"bots"`
+
+	// Legacy single-bot fields — kept for backward compatibility.
 	AppID               string   `json:"app_id"`
 	AppSecret           string   `json:"app_secret"`
 	VerificationToken   string   `json:"verification_token"`
@@ -31,7 +83,9 @@ type FeishuConfig struct {
 	ApprovalTimeoutSec int      `json:"approval_timeout_sec"`
 	DedupTTLMinutes     int      `json:"dedup_ttl_minutes"`
 	// SendFileMaxBytes caps feishuSendFile uploads (default 30 MiB).
-	SendFileMaxBytes int `json:"send_file_max_bytes"`
+	// Supports human-readable formats: "200MB", "1GB", "50M", or plain bytes.
+	SendFileMaxBytes    int    `json:"-"`
+	SendFileMaxBytesRaw any    `json:"send_file_max_bytes"`
 	// SendFileRoot if set, path arguments must resolve under this directory (absolute recommended).
 	SendFileRoot string `json:"send_file_root"`
 	// ExtraPrompt is appended after ExtraPromptFile content (if any) and prefixed to each Feishu inbound RunAgent user message. See README (not applied to cron-only RunAgent).
@@ -46,7 +100,9 @@ type FeishuConfig struct {
 	// InboundMediaEnabled: when true (default), download user-sent image/file messages via Feishu message-resource API into workspace.
 	InboundMediaEnabled bool `json:"inbound_media_enabled"`
 	// InboundMediaMaxBytes caps a single downloaded resource (default same as send cap).
-	InboundMediaMaxBytes int `json:"inbound_media_max_bytes"`
+	// Supports human-readable formats: "200MB", "1GB", "50M", or plain bytes.
+	InboundMediaMaxBytes    int `json:"-"`
+	InboundMediaMaxBytesRaw any `json:"inbound_media_max_bytes"`
 	// InboundMediaDir is a subdirectory under Workspace (or fallback root) for saved files.
 	InboundMediaDir string `json:"inbound_media_dir"`
 	// InboundMediaTimeoutSec limits HTTP download time per resource (default 45).
@@ -81,14 +137,66 @@ func parseFeishuConfig(jsonStr string) (FeishuConfig, error) {
 	if err := json.Unmarshal([]byte(jsonStr), &cfg); err != nil {
 		return cfg, err
 	}
+
+	// Backward compat: if no bots[] but legacy app_id is set, convert to single bot.
+	if len(cfg.Bots) == 0 && strings.TrimSpace(cfg.AppID) != "" {
+		cfg.Bots = []BotConfig{{
+			AppID:             cfg.AppID,
+			AppSecret:         cfg.AppSecret,
+			VerificationToken: cfg.VerificationToken,
+			EncryptKey:        cfg.EncryptKey,
+			AllowFrom:         cfg.AllowFrom,
+		}}
+	}
+
 	if cfg.ApprovalTimeoutSec <= 0 {
 		cfg.ApprovalTimeoutSec = 300
 	}
 	if cfg.DedupTTLMinutes <= 0 {
 		cfg.DedupTTLMinutes = 10
 	}
+
+	// Parse SendFileMaxBytes
+	if cfg.SendFileMaxBytesRaw != nil {
+		var sizeStr string
+		switch v := cfg.SendFileMaxBytesRaw.(type) {
+		case string:
+			sizeStr = v
+		case float64:
+			cfg.SendFileMaxBytes = int(v)
+		case int:
+			cfg.SendFileMaxBytes = v
+		default:
+			sizeStr = fmt.Sprint(v)
+		}
+		if sizeStr != "" {
+			if size, err := parseSize(sizeStr); err == nil {
+				cfg.SendFileMaxBytes = int(size)
+			}
+		}
+	}
 	if cfg.SendFileMaxBytes <= 0 {
 		cfg.SendFileMaxBytes = defaultSendFileMaxBytes
+	}
+
+	// Parse InboundMediaMaxBytes
+	if cfg.InboundMediaMaxBytesRaw != nil {
+		var sizeStr string
+		switch v := cfg.InboundMediaMaxBytesRaw.(type) {
+		case string:
+			sizeStr = v
+		case float64:
+			cfg.InboundMediaMaxBytes = int(v)
+		case int:
+			cfg.InboundMediaMaxBytes = v
+		default:
+			sizeStr = fmt.Sprint(v)
+		}
+		if sizeStr != "" {
+			if size, err := parseSize(sizeStr); err == nil {
+				cfg.InboundMediaMaxBytes = int(size)
+			}
+		}
 	}
 	if cfg.InboundMediaMaxBytes <= 0 {
 		cfg.InboundMediaMaxBytes = cfg.SendFileMaxBytes

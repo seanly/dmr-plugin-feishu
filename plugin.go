@@ -11,17 +11,31 @@ import (
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkdispatcher "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
 	"github.com/seanly/dmr/pkg/plugin/proto"
 )
 
+// BotInstance holds a single Feishu bot's lark client, websocket, and approver.
+type BotInstance struct {
+	cfg      BotConfig
+	lc       *lark.Client
+	wsClient *larkws.Client
+	approver *FeishuApprover
+}
+
 // FeishuPlugin implements proto.DMRPluginInterface and proto.HostClientSetter.
 type FeishuPlugin struct {
 	cfg FeishuConfig
 
-	lc       *lark.Client
-	wsClient *larkws.Client
+	// Multi-bot instances.
+	botsMu sync.RWMutex
+	bots   []*BotInstance
+
+	// Dynamic routing: chat_id -> bot instance (built on message receive).
+	routingMu sync.RWMutex
+	routing   map[string]*BotInstance
 
 	hostMu     sync.Mutex
 	hostClient *rpc.Client
@@ -31,9 +45,8 @@ type FeishuPlugin struct {
 	cancel   context.CancelFunc
 	shutdown sync.Once
 
-	dedup    *deduper
-	approver *FeishuApprover
-	queues   *queueManager
+	dedup  *deduper
+	queues *queueManager
 
 	// activeJob is set for the duration of callRunAgent in processJob so CallTool (e.g. feishuSendFile, feishuSendText)
 	// can route to the current Feishu chat/thread. Nil when not inside RunAgent.
@@ -47,9 +60,9 @@ type FeishuPlugin struct {
 // NewFeishuPlugin builds the plugin implementation used by main.
 func NewFeishuPlugin() *FeishuPlugin {
 	p := &FeishuPlugin{
-		cfg: defaultFeishuConfig(),
+		cfg:     defaultFeishuConfig(),
+		routing: make(map[string]*BotInstance),
 	}
-	p.approver = newFeishuApprover(p)
 	p.queues = newQueueManager(p)
 	return p
 }
@@ -72,6 +85,22 @@ func (p *FeishuPlugin) getActiveJob() *inboundJob {
 	return p.activeJob
 }
 
+func (p *FeishuPlugin) registerChatRoute(chatID string, bot *BotInstance) {
+	p.routingMu.Lock()
+	defer p.routingMu.Unlock()
+	p.routing[chatID] = bot
+}
+
+func (p *FeishuPlugin) getBotForChat(chatID string) (*BotInstance, error) {
+	p.routingMu.RLock()
+	defer p.routingMu.RUnlock()
+	bot, ok := p.routing[chatID]
+	if !ok {
+		return nil, fmt.Errorf("no bot found for chat_id: %s", chatID)
+	}
+	return bot, nil
+}
+
 func (p *FeishuPlugin) SetHostClient(client any) {
 	c, ok := client.(*rpc.Client)
 	if !ok || c == nil {
@@ -91,11 +120,8 @@ func (p *FeishuPlugin) Init(req *proto.InitRequest, resp *proto.InitResponse) er
 	}
 	p.cfg = cfg
 
-	if cfg.AppID == "" || cfg.AppSecret == "" {
-		return fmt.Errorf("feishu: app_id and app_secret are required")
-	}
-	if strings.TrimSpace(cfg.DmrRestartToken) != "" && len(cfg.AllowFrom) == 0 {
-		return fmt.Errorf("feishu: dmr_restart_token requires allow_from (restrict who can restart DMR)")
+	if len(cfg.Bots) == 0 {
+		return fmt.Errorf("feishu: no bots configured (provide bots[] or legacy app_id/app_secret)")
 	}
 
 	resolvedExtra, err := buildResolvedExtraPrompt(cfg)
@@ -107,20 +133,7 @@ func (p *FeishuPlugin) Init(req *proto.InitRequest, resp *proto.InitResponse) er
 		log.Printf("feishu: extra run prompt enabled (%d bytes); prepended to inbound RunAgent user message", len(resolvedExtra))
 	}
 
-	// Debug-only sanity check: verify config was unmarshaled correctly.
-	// We intentionally do not print secrets.
-	vtSet := strings.TrimSpace(cfg.VerificationToken) != ""
-	ekSet := strings.TrimSpace(cfg.EncryptKey) != ""
-	appIDPrefix := cfg.AppID
-	if len(appIDPrefix) > 6 {
-		appIDPrefix = appIDPrefix[:6]
-	}
-	log.Printf("feishu: init cfg vt_set=%v ek_set=%v allow_from=%d app_id_prefix=%q (p2p-only)",
-		vtSet, ekSet, len(cfg.AllowFrom), appIDPrefix)
-	log.Printf("feishu: tools (e.g. feishuSendFile, feishuSendText) are registered when DMR first collects tools for an agent run (ProvideTools RPC), not during this Init")
-
 	p.dedup = newDeduper(cfg.dedupTTL())
-	p.lc = lark.NewClient(cfg.AppID, cfg.AppSecret)
 
 	p.runMu.Lock()
 	if p.cancel != nil {
@@ -131,18 +144,43 @@ func (p *FeishuPlugin) Init(req *proto.InitRequest, resp *proto.InitResponse) er
 	p.cancel = cancel
 	p.runMu.Unlock()
 
-	dispatcher := larkdispatcher.NewEventDispatcher(cfg.VerificationToken, cfg.EncryptKey).
-		OnP2MessageReceiveV1(p.handleMessageReceive)
-
-	p.wsClient = larkws.NewClient(cfg.AppID, cfg.AppSecret, larkws.WithEventHandler(dispatcher))
-	ws := p.wsClient
-
-	go func() {
-		log.Printf("feishu: websocket client starting")
-		if err := ws.Start(ctx); err != nil && ctx.Err() == nil {
-			log.Printf("feishu: websocket stopped: %v", err)
+	// Create bot instances.
+	for i, botCfg := range cfg.Bots {
+		if botCfg.AppID == "" || botCfg.AppSecret == "" {
+			return fmt.Errorf("feishu: bot #%d missing app_id or app_secret", i)
 		}
-	}()
+
+		bot := &BotInstance{
+			cfg: botCfg,
+			lc:  lark.NewClient(botCfg.AppID, botCfg.AppSecret),
+		}
+		bot.approver = newFeishuApprover(p, bot)
+
+		// Each bot's message handler (closure captures bot).
+		dispatcher := larkdispatcher.NewEventDispatcher(botCfg.VerificationToken, botCfg.EncryptKey).
+			OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
+				return p.handleMessageReceive(ctx, bot, event)
+			})
+
+		bot.wsClient = larkws.NewClient(botCfg.AppID, botCfg.AppSecret, larkws.WithEventHandler(dispatcher))
+		p.bots = append(p.bots, bot)
+
+		appIDPrefix := botCfg.AppID
+		if len(appIDPrefix) > 6 {
+			appIDPrefix = appIDPrefix[:6]
+		}
+		log.Printf("feishu: bot #%d app_id_prefix=%q allow_from=%d", i, appIDPrefix, len(botCfg.AllowFrom))
+
+		go func(b *BotInstance, idx int) {
+			log.Printf("feishu: starting bot #%d websocket", idx)
+			if err := b.wsClient.Start(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("feishu: bot #%d websocket stopped: %v", idx, err)
+			}
+		}(bot, i)
+	}
+
+	log.Printf("feishu: initialized %d bots", len(p.bots))
+	log.Printf("feishu: tools (e.g. feishuSendFile, feishuSendText) are registered when DMR first collects tools for an agent run (ProvideTools RPC)")
 
 	p.scheduleInboundRetentionCleanup()
 
@@ -158,28 +196,59 @@ func (p *FeishuPlugin) Shutdown(req *proto.ShutdownRequest, resp *proto.Shutdown
 		}
 		p.runMu.Unlock()
 		if p.queues != nil {
-			p.queues.shutdown()
+			p.queues.shutdownAll()
 		}
-		p.wsClient = nil
+		p.botsMu.Lock()
+		for _, bot := range p.bots {
+			bot.wsClient = nil
+		}
+		p.bots = nil
+		p.botsMu.Unlock()
 	})
 	return nil
 }
 
 func (p *FeishuPlugin) RequestApproval(req *proto.ApprovalRequest, resp *proto.ApprovalResult) error {
-	if p.approver == nil {
+	chatID, ok := p2pChatIDFromTape(strings.TrimSpace(req.Tape))
+	if !ok {
+		resp.Choice = choiceDenied
+		resp.Comment = "unknown tape routing for approval"
+		return nil
+	}
+	bot, err := p.getBotForChat(chatID)
+	if err != nil {
+		resp.Choice = choiceDenied
+		resp.Comment = "no bot found for chat"
+		return nil
+	}
+	if bot.approver == nil {
 		resp.Choice = choiceDenied
 		return nil
 	}
-	p.approver.handleSingle(req, resp)
+	bot.approver.handleSingle(req, resp)
 	return nil
 }
 
 func (p *FeishuPlugin) RequestBatchApproval(req *proto.BatchApprovalRequest, resp *proto.BatchApprovalResult) error {
-	if p.approver == nil {
+	if len(req.Requests) == 0 {
 		resp.Choice = choiceDenied
 		return nil
 	}
-	p.approver.handleBatch(req, resp)
+	chatID, ok := p2pChatIDFromTape(strings.TrimSpace(req.Requests[0].Tape))
+	if !ok {
+		resp.Choice = choiceDenied
+		return nil
+	}
+	bot, err := p.getBotForChat(chatID)
+	if err != nil {
+		resp.Choice = choiceDenied
+		return nil
+	}
+	if bot.approver == nil {
+		resp.Choice = choiceDenied
+		return nil
+	}
+	bot.approver.handleBatch(req, resp)
 	return nil
 }
 

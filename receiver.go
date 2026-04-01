@@ -22,7 +22,7 @@ func shouldSkipRunAgentStandaloneMedia(message *larkim.EventMessage) bool {
 	return mt == larkim.MsgTypeImage || mt == larkim.MsgTypeFile
 }
 
-func (p *FeishuPlugin) handleMessageReceive(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
+func (p *FeishuPlugin) handleMessageReceive(ctx context.Context, bot *BotInstance, event *larkim.P2MessageReceiveV1) error {
 	if event == nil || event.Event == nil || event.Event.Message == nil {
 		log.Printf("feishu: P2MessageReceiveV1: nil event/event.message (event=%T)", event)
 		return nil
@@ -37,6 +37,9 @@ func (p *FeishuPlugin) handleMessageReceive(ctx context.Context, event *larkim.P
 		return nil
 	}
 
+	// Register chat_id -> bot routing.
+	p.registerChatRoute(chatID, bot)
+
 	senderID := extractFeishuSenderID(sender)
 	if senderID == "" {
 		senderID = "unknown"
@@ -48,7 +51,7 @@ func (p *FeishuPlugin) handleMessageReceive(ctx context.Context, event *larkim.P
 		return nil
 	}
 
-	userText := p.buildInboundUserContent(ctx, message)
+	userText := p.buildInboundUserContent(ctx, bot, message)
 
 	chatType := stringValue(message.ChatType)
 	threadKey := stringValue(message.ThreadId)
@@ -63,7 +66,7 @@ func (p *FeishuPlugin) handleMessageReceive(ctx context.Context, event *larkim.P
 		return nil
 	}
 
-	modelContent := p.mergeInboundReplyContext(ctx, message, userText)
+	modelContent := p.mergeInboundReplyContext(ctx, bot, message, userText)
 	modelPreview := modelContent
 	// truncateRunes is byte-safe for UTF-8; cap log line by runes like outbound helpers.
 	if modelPreview != truncateRunes(modelPreview, 200) {
@@ -75,18 +78,19 @@ func (p *FeishuPlugin) handleMessageReceive(ctx context.Context, event *larkim.P
 	)
 
 	// Approval replies must not start the agent (match on user-typed text only, not quoted parent block).
-	if p.approver != nil && p.approver.TryResolveP2P(chatID, userText) {
+	if bot.approver != nil && bot.approver.TryResolveP2P(chatID, userText) {
 		log.Printf("feishu: p2p approval reply consumed (chatID=%q)", chatID)
 		return nil
 	}
 
-	senderOK := isAllowedSender(p.cfg.AllowFrom, senderID)
+	// Use bot-specific allow_from.
+	senderOK := isAllowedSender(bot.cfg.AllowFrom, senderID)
 	if !senderOK {
-		log.Printf("feishu: sender not allowed (senderID=%q allow_from=%v)", senderID, p.cfg.AllowFrom)
+		log.Printf("feishu: sender not allowed (senderID=%q allow_from=%v)", senderID, bot.cfg.AllowFrom)
 		return nil
 	}
 
-	if p.tryHandleDMRRestart(ctx, chatID, msgID, inThread, userText) {
+	if p.tryHandleDMRRestart(ctx, bot, chatID, msgID, inThread, userText) {
 		return nil
 	}
 
@@ -100,6 +104,7 @@ func (p *FeishuPlugin) handleMessageReceive(ctx context.Context, event *larkim.P
 		QueueKey:         tape,
 		TapeName:         tape,
 		ChatID:           chatID,
+		Bot:              bot,
 		SenderID:         senderID,
 		Content:          modelContent,
 		TriggerMessageID: msgID,

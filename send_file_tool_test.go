@@ -54,7 +54,7 @@ func TestResolveSendFilePath_relativeOk(t *testing.T) {
 	if err := os.WriteFile(full, []byte("hi"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	abs, err := resolveSendFilePath(rel, root)
+	abs, err := resolveSendFilePath(rel, root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestResolveSendFilePath_relativeOk(t *testing.T) {
 
 func TestResolveSendFilePath_escapeRejected(t *testing.T) {
 	root := t.TempDir()
-	_, err := resolveSendFilePath(filepath.Join("..", "..", "etc", "passwd"), root)
+	_, err := resolveSendFilePath(filepath.Join("..", "..", "etc", "passwd"), root, "")
 	if err == nil {
 		t.Fatal("expected escape error")
 	}

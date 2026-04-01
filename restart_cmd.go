@@ -36,7 +36,7 @@ func constantTimeStringEqual(a, b string) bool {
 }
 
 // tryHandleDMRRestart handles a configured admin restart line; returns true if the message was consumed (restart or error reply).
-func (p *FeishuPlugin) tryHandleDMRRestart(ctx context.Context, chatID, triggerMsgID string, inThread bool, content string) bool {
+func (p *FeishuPlugin) tryHandleDMRRestart(ctx context.Context, bot *BotInstance, chatID, triggerMsgID string, inThread bool, content string) bool {
 	wantTok := strings.TrimSpace(p.cfg.DmrRestartToken)
 	if wantTok == "" {
 		return false
@@ -47,6 +47,7 @@ func (p *FeishuPlugin) tryHandleDMRRestart(ctx context.Context, chatID, triggerM
 	}
 	job := &inboundJob{
 		ChatID:           chatID,
+		Bot:              bot,
 		TriggerMessageID: triggerMsgID,
 		InThread:         inThread,
 	}
