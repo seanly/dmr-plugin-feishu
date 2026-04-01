@@ -90,10 +90,6 @@ func (p *FeishuPlugin) handleMessageReceive(ctx context.Context, bot *BotInstanc
 		return nil
 	}
 
-	if p.tryHandleDMRRestart(ctx, bot, chatID, msgID, inThread, userText) {
-		return nil
-	}
-
 	if shouldSkipRunAgentStandaloneMedia(message) {
 		log.Printf("feishu: standalone %s inbound save-only (no RunAgent); msgID=%q chatID=%q", stringValue(message.MessageType), msgID, chatID)
 		return nil

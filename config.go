@@ -92,11 +92,6 @@ type FeishuConfig struct {
 	ExtraPrompt string `json:"extra_prompt"`
 	// ExtraPromptFile is UTF-8 text; relative paths resolve against ConfigBaseDir.
 	ExtraPromptFile string `json:"extra_prompt_file"`
-	// DmrRestartTrigger + DmrRestartToken: if token is non-empty, a p2p message whose first line is
-	// "<trigger> <token>" triggers host RestartHost (same as `dmr serve service restart`). Requires allow_from.
-	DmrRestartTrigger string `json:"dmr_restart_trigger"`
-	DmrRestartToken   string `json:"dmr_restart_token"`
-
 	// InboundMediaEnabled: when true (default), download user-sent image/file messages via Feishu message-resource API into workspace.
 	InboundMediaEnabled bool `json:"inbound_media_enabled"`
 	// InboundMediaMaxBytes caps a single downloaded resource (default same as send cap).
