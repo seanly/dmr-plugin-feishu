@@ -133,7 +133,7 @@ func (p *FeishuPlugin) processJob(job *inboundJob) {
 	log.Printf("feishu: processJob tape=%q", job.TapeName)
 
 	p.setActiveJob(job)
-	defer p.clearActiveJob()
+	defer p.clearActiveJob(job.TapeName)
 
 	// HistoryAfterEntryID 0 => DMR uses default tape read (LastAnchorContext); no plugin-side TapeHandoff.
 	// Comma commands (command plugin InterceptInput) require the prompt to start with "," after trim.

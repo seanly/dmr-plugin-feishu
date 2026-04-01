@@ -73,7 +73,7 @@ func TestResolveSendFilePath_escapeRejected(t *testing.T) {
 
 func TestExecSendFile_noActiveJob(t *testing.T) {
 	p := NewFeishuPlugin()
-	_, err := p.execSendFile(context.Background(), `{"path":"foo"}`)
+	_, err := p.execSendFile(context.Background(), `{"path":"foo"}`, nil)
 	if err == nil || !strings.Contains(err.Error(), "Feishu-triggered") {
 		t.Fatalf("got err=%v", err)
 	}
@@ -81,10 +81,9 @@ func TestExecSendFile_noActiveJob(t *testing.T) {
 
 func TestExecSendFile_pathRequired(t *testing.T) {
 	p := NewFeishuPlugin()
-	p.setActiveJob(&inboundJob{ChatID: "c"})
-	defer p.clearActiveJob()
+	job := &inboundJob{ChatID: "c", TapeName: "feishu:p2p:c"}
 
-	_, err := p.execSendFile(context.Background(), `{}`)
+	_, err := p.execSendFile(context.Background(), `{}`, job)
 	if err == nil || !strings.Contains(err.Error(), "path is required") {
 		t.Fatalf("got %v", err)
 	}
@@ -92,10 +91,9 @@ func TestExecSendFile_pathRequired(t *testing.T) {
 
 func TestExecSendFile_contentBase64Rejected(t *testing.T) {
 	p := NewFeishuPlugin()
-	p.setActiveJob(&inboundJob{ChatID: "c"})
-	defer p.clearActiveJob()
+	job := &inboundJob{ChatID: "c", TapeName: "feishu:p2p:c"}
 
-	_, err := p.execSendFile(context.Background(), `{"content_base64":"Zg==","filename":"x.txt"}`)
+	_, err := p.execSendFile(context.Background(), `{"content_base64":"Zg==","filename":"x.txt"}`, job)
 	if err == nil || !strings.Contains(err.Error(), "content_base64") {
 		t.Fatalf("got %v", err)
 	}
@@ -106,14 +104,13 @@ func TestExecSendFile_fileTooLarge(t *testing.T) {
 	p.cfg.SendFileMaxBytes = 10
 	root := t.TempDir()
 	p.cfg.SendFileRoot = root
-	p.setActiveJob(&inboundJob{ChatID: "c"})
-	defer p.clearActiveJob()
+	job := &inboundJob{ChatID: "c", TapeName: "feishu:p2p:c"}
 
 	path := filepath.Join(root, "big.bin")
 	if err := os.WriteFile(path, []byte(strings.Repeat("x", 20)), 0644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := p.execSendFile(context.Background(), `{"path":"big.bin"}`)
+	_, err := p.execSendFile(context.Background(), `{"path":"big.bin"}`, job)
 	if err == nil || !strings.Contains(err.Error(), "exceeds limit") {
 		t.Fatalf("got %v", err)
 	}

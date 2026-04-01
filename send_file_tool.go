@@ -131,9 +131,8 @@ func resolveSendFilePath(pathStr, rootFromCfg, workspace string) (absPath string
 	return pathAbs, nil
 }
 
-// execSendFile runs feishuSendFile using the active inbound job (Feishu-triggered RunAgent only).
-func (p *FeishuPlugin) execSendFile(ctx context.Context, argsJSON string) (map[string]any, error) {
-	job := p.getActiveJob()
+// execSendFile runs feishuSendFile. job is looked up by SessionTape in CallTool; nil when not Feishu-triggered.
+func (p *FeishuPlugin) execSendFile(ctx context.Context, argsJSON string, job *inboundJob) (map[string]any, error) {
 	if job == nil {
 		return nil, fmt.Errorf("feishuSendFile only works during a Feishu-triggered RunAgent (no active chat context)")
 	}

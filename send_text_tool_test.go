@@ -49,7 +49,7 @@ func TestArgBool(t *testing.T) {
 
 func TestExecSendText_missingText(t *testing.T) {
 	p := NewFeishuPlugin()
-	_, err := p.execSendText(context.Background(), `{}`)
+	_, err := p.execSendText(context.Background(), `{}`, nil)
 	if err == nil || !strings.Contains(err.Error(), "text") {
 		t.Fatalf("got %v", err)
 	}
@@ -57,7 +57,7 @@ func TestExecSendText_missingText(t *testing.T) {
 
 func TestExecSendText_noJobNoTarget(t *testing.T) {
 	p := NewFeishuPlugin()
-	_, err := p.execSendText(context.Background(), `{"text":"hi"}`)
+	_, err := p.execSendText(context.Background(), `{"text":"hi"}`, nil)
 	if err == nil || !strings.Contains(err.Error(), "tape_name") {
 		t.Fatalf("got %v", err)
 	}
@@ -65,7 +65,7 @@ func TestExecSendText_noJobNoTarget(t *testing.T) {
 
 func TestExecSendText_noJobBothTargets(t *testing.T) {
 	p := NewFeishuPlugin()
-	_, err := p.execSendText(context.Background(), `{"text":"hi","tape_name":"feishu:p2p:oc_x","chat_id":"oc_y"}`)
+	_, err := p.execSendText(context.Background(), `{"text":"hi","tape_name":"feishu:p2p:oc_x","chat_id":"oc_y"}`, nil)
 	if err == nil || !strings.Contains(err.Error(), "at most one") {
 		t.Fatalf("got %v", err)
 	}
@@ -73,10 +73,9 @@ func TestExecSendText_noJobBothTargets(t *testing.T) {
 
 func TestExecSendText_activeJobWithTapeNameRejected(t *testing.T) {
 	p := NewFeishuPlugin()
-	p.setActiveJob(&inboundJob{ChatID: "oc_x"})
-	defer p.clearActiveJob()
+	job := &inboundJob{ChatID: "oc_x", TapeName: "feishu:p2p:oc_x"}
 
-	_, err := p.execSendText(context.Background(), `{"text":"hi","tape_name":"feishu:p2p:oc_x"}`)
+	_, err := p.execSendText(context.Background(), `{"text":"hi","tape_name":"feishu:p2p:oc_x"}`, job)
 	if err == nil || !strings.Contains(err.Error(), "tape_name") {
 		t.Fatalf("got %v", err)
 	}
@@ -88,7 +87,7 @@ func TestExecSendText_noClientWithTarget(t *testing.T) {
 	bot := &BotInstance{}
 	p.registerChatRoute("oc_1", bot)
 	// Valid args but lc is nil -> deliver fails
-	_, err := p.execSendText(context.Background(), `{"text":"hi","tape_name":"feishu:p2p:oc_1"}`)
+	_, err := p.execSendText(context.Background(), `{"text":"hi","tape_name":"feishu:p2p:oc_1"}`, nil)
 	if err == nil || !strings.Contains(err.Error(), "client not initialized") {
 		t.Fatalf("got %v", err)
 	}
@@ -97,10 +96,9 @@ func TestExecSendText_noClientWithTarget(t *testing.T) {
 func TestExecSendText_activeJobNoClient(t *testing.T) {
 	p := NewFeishuPlugin()
 	bot := &BotInstance{} // nil lc
-	p.setActiveJob(&inboundJob{ChatID: "oc_x", Bot: bot})
-	defer p.clearActiveJob()
+	job := &inboundJob{ChatID: "oc_x", Bot: bot, TapeName: "feishu:p2p:oc_x"}
 
-	_, err := p.execSendText(context.Background(), `{"text":"hello"}`)
+	_, err := p.execSendText(context.Background(), `{"text":"hello"}`, job)
 	if err == nil || !strings.Contains(err.Error(), "client not initialized") {
 		t.Fatalf("got %v", err)
 	}

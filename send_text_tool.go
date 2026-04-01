@@ -75,8 +75,8 @@ func argBool(m map[string]any, key string) bool {
 	}
 }
 
-// execSendText implements feishuSendText for active Feishu jobs and for unattended runs (tape_name / chat_id).
-func (p *FeishuPlugin) execSendText(ctx context.Context, argsJSON string) (map[string]any, error) {
+// execSendText implements feishuSendText. job is looked up by SessionTape in CallTool; nil for unattended runs.
+func (p *FeishuPlugin) execSendText(ctx context.Context, argsJSON string, job *inboundJob) (map[string]any, error) {
 	var raw map[string]any
 	if strings.TrimSpace(argsJSON) == "" {
 		raw = map[string]any{}
@@ -93,7 +93,6 @@ func (p *FeishuPlugin) execSendText(ctx context.Context, argsJSON string) (map[s
 	tapeName := argString(raw, "tape_name")
 	chatIDArg := argString(raw, "chat_id")
 
-	job := p.getActiveJob()
 	if job != nil {
 		if tapeName != "" || chatIDArg != "" {
 			return nil, fmt.Errorf("do not set tape_name or chat_id during a Feishu-triggered RunAgent; the active private chat is used automatically")

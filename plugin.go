@@ -48,10 +48,11 @@ type FeishuPlugin struct {
 	dedup  *deduper
 	queues *queueManager
 
-	// activeJob is set for the duration of callRunAgent in processJob so CallTool (e.g. feishuSendFile, feishuSendText)
-	// can route to the current Feishu chat/thread. Nil when not inside RunAgent.
-	activeJobMu sync.Mutex
-	activeJob   *inboundJob
+	// activeJobs maps tape_name -> inboundJob for the duration of callRunAgent in processJob
+	// so CallTool (e.g. feishuSendFile, feishuSendText) can route to the correct Feishu chat/thread
+	// even when multiple bots process jobs concurrently.
+	activeJobsMu sync.RWMutex
+	activeJobs   map[string]*inboundJob
 
 	// extraRunPrompt is built at Init from extra_prompt_file + extra_prompt (Feishu inbound RunAgent only).
 	extraRunPrompt string
@@ -60,29 +61,39 @@ type FeishuPlugin struct {
 // NewFeishuPlugin builds the plugin implementation used by main.
 func NewFeishuPlugin() *FeishuPlugin {
 	p := &FeishuPlugin{
-		cfg:     defaultFeishuConfig(),
-		routing: make(map[string]*BotInstance),
+		cfg:        defaultFeishuConfig(),
+		routing:    make(map[string]*BotInstance),
+		activeJobs: make(map[string]*inboundJob),
 	}
 	p.queues = newQueueManager(p)
 	return p
 }
 
 func (p *FeishuPlugin) setActiveJob(job *inboundJob) {
-	p.activeJobMu.Lock()
-	p.activeJob = job
-	p.activeJobMu.Unlock()
+	p.activeJobsMu.Lock()
+	p.activeJobs[job.TapeName] = job
+	p.activeJobsMu.Unlock()
 }
 
-func (p *FeishuPlugin) clearActiveJob() {
-	p.activeJobMu.Lock()
-	p.activeJob = nil
-	p.activeJobMu.Unlock()
+func (p *FeishuPlugin) clearActiveJob(tapeName string) {
+	p.activeJobsMu.Lock()
+	delete(p.activeJobs, tapeName)
+	p.activeJobsMu.Unlock()
 }
 
-func (p *FeishuPlugin) getActiveJob() *inboundJob {
-	p.activeJobMu.Lock()
-	defer p.activeJobMu.Unlock()
-	return p.activeJob
+// getActiveJobByTape returns the active job for the given tape, handling subagent tape suffixes.
+func (p *FeishuPlugin) getActiveJobByTape(tapeName string) *inboundJob {
+	p.activeJobsMu.RLock()
+	defer p.activeJobsMu.RUnlock()
+	if job, ok := p.activeJobs[tapeName]; ok {
+		return job
+	}
+	// Try stripping subagent suffix (e.g. "feishu:p2p:oc_xxx:subagent" -> "feishu:p2p:oc_xxx").
+	parent := stripDMRSubagentChildTapeSuffix(tapeName)
+	if parent != tapeName {
+		return p.activeJobs[parent]
+	}
+	return nil
 }
 
 func (p *FeishuPlugin) registerChatRoute(chatID string, bot *BotInstance) {
@@ -281,9 +292,13 @@ func (p *FeishuPlugin) CallTool(req *proto.CallToolRequest, resp *proto.CallTool
 	}
 	p.runMu.Unlock()
 
+	// Look up the active job by the session tape passed from the DMR host.
+	// This replaces the old global activeJob and prevents cross-bot routing.
+	job := p.getActiveJobByTape(req.SessionTape)
+
 	switch req.Name {
 	case "feishuSendFile":
-		result, err := p.execSendFile(ctx, req.ArgsJSON)
+		result, err := p.execSendFile(ctx, req.ArgsJSON, job)
 		if err != nil {
 			resp.Error = err.Error()
 			return nil
@@ -296,7 +311,7 @@ func (p *FeishuPlugin) CallTool(req *proto.CallToolRequest, resp *proto.CallTool
 		resp.ResultJSON = string(b)
 		return nil
 	case "feishuSendText":
-		result, err := p.execSendText(ctx, req.ArgsJSON)
+		result, err := p.execSendText(ctx, req.ArgsJSON, job)
 		if err != nil {
 			resp.Error = err.Error()
 			return nil
