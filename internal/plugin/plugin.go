@@ -25,6 +25,13 @@ import (
 	"github.com/seanly/dmr/pkg/plugin/proto"
 )
 
+// WebSocket reconnection constants
+const (
+	wsInitialRetryDelay = 5 * time.Second
+	wsMaxRetryDelay     = 5 * time.Minute
+	wsRetryMultiplier   = 2.0
+)
+
 // Plugin implements proto.DMRPluginInterface.
 type Plugin struct {
 	cfg Config
@@ -132,9 +139,22 @@ func (p *Plugin) Init(req *proto.InitRequest, resp *proto.InitResponse) error {
 				EncryptKey:        botCfg.EncryptKey,
 				AllowFrom:         botCfg.AllowFrom,
 			},
-			Client: bot.NewClient(botCfg.AppID, botCfg.AppSecret),
+			Client:         bot.NewClient(botCfg.AppID, botCfg.AppSecret),
+			GroupEnabled:   botCfg.GroupEnabled,
+			ApproverOpenID: botCfg.Approver,
 		}
 		inst.Approver = bot.NewApprover(p)
+
+		// Auto-fetch bot_id at startup
+		fetchCtx, fetchCancel := context.WithTimeout(ctx, 15*time.Second)
+		fetchedID, err := inst.Client.GetBotID(fetchCtx)
+		fetchCancel()
+		if err != nil {
+			log.Printf("feishu: bot #%d failed to auto-fetch bot_open_id: %v", i, err)
+		} else {
+			inst.BotID = fetchedID
+			log.Printf("feishu: bot #%d bot_open_id=%s (auto-fetched)", i, inst.BotID)
+		}
 
 		// Each bot's message handler
 		botInst := inst // capture for closure
@@ -153,13 +173,8 @@ func (p *Plugin) Init(req *proto.InitRequest, resp *proto.InitResponse) error {
 		}
 		log.Printf("feishu: bot #%d app_id_prefix=%q", i, appIDPrefix)
 
-		// Start WebSocket in background
-		go func(ws *larkws.Client, idx int) {
-			log.Printf("feishu: starting bot #%d websocket", idx)
-			if err := ws.Start(ctx); err != nil && ctx.Err() == nil {
-				log.Printf("feishu: bot #%d websocket stopped: %v", idx, err)
-			}
-		}(inst.WSClient, i)
+		// Start WebSocket in background with reconnection
+		go p.runWebSocketWithReconnect(ctx, inst.WSClient, dispatcher, i, botCfg)
 	}
 
 	log.Printf("feishu: initialized %d bots", len(p.bots))
@@ -190,13 +205,18 @@ func (p *Plugin) Shutdown(req *proto.ShutdownRequest, resp *proto.ShutdownRespon
 }
 
 // RequestApproval handles single approval request.
+// For group chats, approval is routed to admin's P2P instead of the group.
 func (p *Plugin) RequestApproval(req *proto.ApprovalRequest, resp *proto.ApprovalResult) error {
-	chatID, ok := inbound.P2PChatIDFromTape(strings.TrimSpace(req.Tape))
-	if !ok {
+	tape := strings.TrimSpace(req.Tape)
+
+	// Determine if this is a group chat and get the routing info
+	chatID, isGroup := p.resolveApprovalChatID(tape)
+	if chatID == "" {
 		resp.Choice = bot.ChoiceDenied
 		resp.Comment = "unknown tape routing for approval"
 		return nil
 	}
+
 	botInst, err := p.GetBotForChat(chatID)
 	if err != nil {
 		resp.Choice = bot.ChoiceDenied
@@ -208,25 +228,56 @@ func (p *Plugin) RequestApproval(req *proto.ApprovalRequest, resp *proto.Approva
 		return nil
 	}
 
+	// Get approver open_id for group chat
+	var approverOpenID string
+	if isGroup {
+		approverOpenID = botInst.ApproverOpenID
+		if approverOpenID == "" {
+			log.Printf("feishu: group approval requested but no approver configured for this bot")
+			resp.Choice = bot.ChoiceDenied
+			resp.Comment = "no approver configured for group approval"
+			return nil
+		}
+	}
+
 	ctx := p.getRunCtx()
+
+	// Build send function based on chat type
 	sendFn := func(prompt string) error {
+		if isGroup {
+			// Send to approver's P2P
+			return botInst.Client.SendApprovalMessageToChat(ctx, approverOpenID, prompt)
+		}
 		return botInst.Client.SendApprovalMessageToChat(ctx, chatID, prompt)
 	}
-	botInst.Approver.HandleSingle(req, resp, chatID, sendFn, p.cfg.GetApprovalTimeout())
+
+	// Determine which chat_id to use for waiting approval
+	waitChatID := chatID
+	if isGroup && approverOpenID != "" {
+		waitChatID = approverOpenID
+	}
+
+	botInst.Approver.HandleSingle(req, resp, waitChatID, sendFn, p.cfg.GetApprovalTimeout())
 	return nil
 }
 
 // RequestBatchApproval handles batch approval request.
+// For group chats, approval is routed to admin's P2P instead of the group.
 func (p *Plugin) RequestBatchApproval(req *proto.BatchApprovalRequest, resp *proto.BatchApprovalResult) error {
 	if len(req.Requests) == 0 {
 		resp.Choice = bot.ChoiceDenied
 		return nil
 	}
-	chatID, ok := inbound.P2PChatIDFromTape(strings.TrimSpace(req.Requests[0].Tape))
-	if !ok {
+
+	tape := strings.TrimSpace(req.Requests[0].Tape)
+
+	// Determine if this is a group chat and get the routing info
+	chatID, isGroup := p.resolveApprovalChatID(tape)
+	if chatID == "" {
 		resp.Choice = bot.ChoiceDenied
 		return nil
 	}
+
 	botInst, err := p.GetBotForChat(chatID)
 	if err != nil {
 		resp.Choice = bot.ChoiceDenied
@@ -237,12 +288,51 @@ func (p *Plugin) RequestBatchApproval(req *proto.BatchApprovalRequest, resp *pro
 		return nil
 	}
 
+	// Get approver open_id for group chat
+	var approverOpenID string
+	if isGroup {
+		approverOpenID = botInst.ApproverOpenID
+		if approverOpenID == "" {
+			log.Printf("feishu: group batch approval requested but no approver configured for this bot")
+			resp.Choice = bot.ChoiceDenied
+			return nil
+		}
+	}
+
 	ctx := p.getRunCtx()
+
+	// Build send function based on chat type
 	sendFn := func(prompt string) error {
+		if isGroup {
+			return botInst.Client.SendApprovalMessageToChat(ctx, approverOpenID, prompt)
+		}
 		return botInst.Client.SendApprovalMessageToChat(ctx, chatID, prompt)
 	}
-	botInst.Approver.HandleBatch(req, resp, chatID, sendFn, p.cfg.GetApprovalTimeout())
+
+	// Determine which chat_id to use for waiting approval
+	waitChatID := chatID
+	if isGroup && approverOpenID != "" {
+		waitChatID = approverOpenID
+	}
+
+	botInst.Approver.HandleBatch(req, resp, waitChatID, sendFn, p.cfg.GetApprovalTimeout())
 	return nil
+}
+
+// resolveApprovalChatID determines the chat_id and whether it's a group chat from tape name.
+// Returns (chat_id, is_group).
+func (p *Plugin) resolveApprovalChatID(tape string) (string, bool) {
+	// Try P2P first
+	if chatID, ok := inbound.P2PChatIDFromTape(tape); ok {
+		return chatID, false
+	}
+
+	// Try group chat
+	if chatID, ok := inbound.GroupChatIDFromTape(tape); ok {
+		return chatID, true
+	}
+
+	return "", false
 }
 
 // ProvideTools returns the tools provided by this plugin.
@@ -270,11 +360,17 @@ func (p *Plugin) CallTool(req *proto.CallToolRequest, resp *proto.CallToolRespon
 
 	// Look up the active job
 	job := p.GetActiveJobByTape(req.SessionTape)
+	if job == nil {
+		log.Printf("feishu: CallTool %s with no active job for session tape %q", req.Name, req.SessionTape)
+	} else {
+		log.Printf("feishu: CallTool %s with active job tape=%q chat_id=%q", req.Name, job.TapeName, job.ChatID)
+	}
 
 	switch req.Name {
 	case "feishuSendFile":
 		result, err := p.execSendFile(ctx, req.ArgsJSON, job)
 		if err != nil {
+			log.Printf("feishu: feishuSendFile failed: %v", err)
 			resp.Error = err.Error()
 			return nil
 		}
@@ -284,6 +380,7 @@ func (p *Plugin) CallTool(req *proto.CallToolRequest, resp *proto.CallToolRespon
 	case "feishuSendText":
 		result, err := p.execSendText(ctx, req.ArgsJSON, job)
 		if err != nil {
+			log.Printf("feishu: feishuSendText failed: %v", err)
 			resp.Error = err.Error()
 			return nil
 		}
@@ -312,7 +409,7 @@ func (p *Plugin) execSendFile(ctx context.Context, argsJSON string, job *queue.J
 		}
 	}
 
-	if jobBot == nil {
+	if jobBot == nil || jobBot.Client == nil {
 		return nil, fmt.Errorf("feishuSendFile only works during a Feishu-triggered RunAgent")
 	}
 
@@ -340,10 +437,19 @@ func (p *Plugin) execSendText(ctx context.Context, argsJSON string, job *queue.J
 		if err != nil {
 			return nil, err
 		}
+		if bot == nil || bot.Client == nil {
+			return nil, fmt.Errorf("bot not initialized for chat_id: %s", chatID)
+		}
 		return bot.Client, nil
 	}
 
-	return tools.ExecuteSendText(ctx, argsJSON, jobChatID, jobTriggerMessageID, jobInThread, jobBot.Client, getBotForChat)
+	// Validate jobBot is available when needed
+	var jobBotClient tools.ThreadAwareMessageClient
+	if jobBot != nil {
+		jobBotClient = jobBot.Client
+	}
+
+	return tools.ExecuteSendText(ctx, argsJSON, jobChatID, jobTriggerMessageID, jobInThread, jobBotClient, getBotForChat)
 }
 
 // Helper methods
@@ -367,14 +473,45 @@ func (p *Plugin) RegisterChatRoute(chatID string, botInst interface{}) {
 }
 
 // GetBotForChat retrieves the bot instance for a chat_id.
+// If not found in routing table, it will try to rebuild by iterating through all bots.
 func (p *Plugin) GetBotForChat(chatID string) (*bot.Instance, error) {
+	// First check routing table
 	p.routingMu.RLock()
-	defer p.routingMu.RUnlock()
 	b, ok := p.routing[chatID]
-	if !ok {
-		return nil, fmt.Errorf("no bot found for chat_id: %s", chatID)
+	p.routingMu.RUnlock()
+	if ok {
+		return b, nil
 	}
-	return b, nil
+
+	// Not found - try to rebuild by iterating through all bots
+	return p.findAndRegisterBotForChat(chatID)
+}
+
+// findAndRegisterBotForChat iterates through all bots to find which one owns this chat_id.
+func (p *Plugin) findAndRegisterBotForChat(chatID string) (*bot.Instance, error) {
+	ctx := context.Background()
+
+	p.botsMu.RLock()
+	defer p.botsMu.RUnlock()
+
+	for _, b := range p.bots {
+		// Try to get chat info to check if this bot has this chat
+		exists, err := b.Client.ChatExists(ctx, chatID)
+		if err != nil {
+			log.Printf("feishu: bot %s failed to check chat %s: %v", b.BotID, chatID, err)
+			continue
+		}
+		if exists {
+			// Found - register it
+			p.routingMu.Lock()
+			p.routing[chatID] = b
+			p.routingMu.Unlock()
+			log.Printf("feishu: rebuilt routing: chat_id=%s -> bot=%s", chatID, b.BotID)
+			return b, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no bot found for chat_id: %s", chatID)
 }
 
 // GetDeduper returns the deduplicator.
@@ -390,24 +527,53 @@ func (p *Plugin) SetActiveJob(job *queue.Job) {
 }
 
 // ClearActiveJob clears the active job for the given tape.
-func (p *Plugin) ClearActiveJob(tapeName string) {
+// If jobID is provided, only clears if the current job matches (prevents race conditions).
+func (p *Plugin) ClearActiveJob(tapeName string, jobID string) {
 	p.activeJobsMu.Lock()
+	defer p.activeJobsMu.Unlock()
+	
+	// If jobID specified, only clear if it matches current job
+	// This prevents delayed cleanup from clearing a newer job
+	if jobID != "" {
+		if current, ok := p.activeJobs[tapeName]; ok && current.ID != jobID {
+			log.Printf("feishu: skip clearing active job (mismatch) tape=%q current=%s requested=%s", 
+				tapeName, current.ID[:8], jobID[:8])
+			return
+		}
+	}
+	
 	delete(p.activeJobs, tapeName)
-	p.activeJobsMu.Unlock()
 }
 
 // GetActiveJobByTape retrieves the active job for a tape.
+// Also handles nested subagent tapes by stripping all :subagent suffixes.
 func (p *Plugin) GetActiveJobByTape(tapeName string) *queue.Job {
 	p.activeJobsMu.RLock()
 	defer p.activeJobsMu.RUnlock()
+	
+	// Direct match
 	if job, ok := p.activeJobs[tapeName]; ok {
 		return job
 	}
-	// Try stripping subagent suffix
+	
+	// Try stripping subagent suffixes recursively
 	parent := inbound.StripDMRSubagentChildTapeSuffix(tapeName)
 	if parent != tapeName {
-		return p.activeJobs[parent]
+		if job, ok := p.activeJobs[parent]; ok {
+			log.Printf("feishu: found job for parent tape %q (from %q)", parent, tapeName)
+			return job
+		}
 	}
+	
+	// Log available jobs for debugging
+	if len(p.activeJobs) > 0 {
+		var available []string
+		for k := range p.activeJobs {
+			available = append(available, k)
+		}
+		log.Printf("feishu: no active job for tape %q (available: %v)", tapeName, available)
+	}
+	
 	return nil
 }
 
@@ -443,7 +609,15 @@ func (p *Plugin) ReplyAgentOutput(ctx context.Context, job *queue.Job, output st
 // TryResolveApproval tries to resolve a message as an approval reply.
 func (p *Plugin) TryResolveApproval(chatID, content string) bool {
 	botInst, err := p.GetBotForChat(chatID)
-	if err != nil || botInst.Approver == nil {
+	if err != nil {
+		// For admin P2P that may not be in routing, try first bot
+		p.botsMu.RLock()
+		if len(p.bots) > 0 {
+			botInst = p.bots[0]
+		}
+		p.botsMu.RUnlock()
+	}
+	if botInst == nil || botInst.Approver == nil {
 		return false
 	}
 	return botInst.Approver.TryResolveP2P(chatID, content)
@@ -452,6 +626,47 @@ func (p *Plugin) TryResolveApproval(chatID, content string) bool {
 // IsAllowedSender checks if a sender is allowed.
 func (p *Plugin) IsAllowedSender(allowList []string, senderID string) bool {
 	return inbound.IsAllowedSender(allowList, senderID)
+}
+
+// SendTextReply sends a text reply to a chat.
+func (p *Plugin) SendTextReply(chatID, text string) error {
+	botInst, err := p.GetBotForChat(chatID)
+	if err != nil {
+		return err
+	}
+	ctx := p.getRunCtx()
+	return botInst.Client.SendTextToChat(ctx, chatID, text)
+}
+
+// IsGroupEnabledForBot returns whether group chat is enabled for a specific bot.
+func (p *Plugin) IsGroupEnabledForBot(botInst interface{}) bool {
+	if b, ok := botInst.(*bot.Instance); ok {
+		return b.GroupEnabled
+	}
+	return false
+}
+
+// GetApproverOpenID returns the approver's open_id for a specific bot.
+func (p *Plugin) GetApproverOpenID(botInst interface{}) string {
+	if b, ok := botInst.(*bot.Instance); ok {
+		return b.ApproverOpenID
+	}
+	return ""
+}
+
+// GetBotID returns the bot's open_id for mention detection.
+// For multi-bot setup, returns the first bot's ID.
+func (p *Plugin) GetBotID(botInst interface{}) string {
+	if b, ok := botInst.(*bot.Instance); ok {
+		return b.BotID
+	}
+	// Fallback: try first bot
+	p.botsMu.RLock()
+	defer p.botsMu.RUnlock()
+	if len(p.bots) > 0 {
+		return p.bots[0].BotID
+	}
+	return ""
 }
 
 // EnqueueJob enqueues a job for processing.
@@ -514,6 +729,48 @@ func (p *Plugin) scheduleInboundRetentionCleanup() {
 func (p *Plugin) handleMessageReceive(ctx context.Context, botInst *bot.Instance, event *larkim.P2MessageReceiveV1) error {
 	receiver := &inbound.Receiver{Plugin: p}
 	return receiver.HandleMessageReceive(ctx, botInst, botInst.Client.Lark, botInst.Config.AllowFrom, event)
+}
+
+// runWebSocketWithReconnect runs WebSocket with exponential backoff reconnection.
+func (p *Plugin) runWebSocketWithReconnect(parentCtx context.Context, ws *larkws.Client, dispatcher *larkdispatcher.EventDispatcher, idx int, botCfg BotConfig) {
+	retryDelay := wsInitialRetryDelay
+	
+	for {
+		select {
+		case <-parentCtx.Done():
+			log.Printf("feishu: bot #%d websocket loop stopped (context cancelled)", idx)
+			return
+		default:
+		}
+		
+		log.Printf("feishu: starting bot #%d websocket", idx)
+		err := ws.Start(parentCtx)
+		
+		// Check if shutdown requested
+		if parentCtx.Err() != nil {
+			log.Printf("feishu: bot #%d websocket stopped (context cancelled)", idx)
+			return
+		}
+		
+		if err != nil {
+			log.Printf("feishu: bot #%d websocket error: %v, reconnecting in %v...", idx, err, retryDelay)
+		}
+		
+		// Wait before reconnecting
+		select {
+		case <-time.After(retryDelay):
+			// Increase delay for next retry (exponential backoff)
+			retryDelay = time.Duration(float64(retryDelay) * wsRetryMultiplier)
+			if retryDelay > wsMaxRetryDelay {
+				retryDelay = wsMaxRetryDelay
+			}
+			// Recreate WebSocket client for fresh connection
+			ws = larkws.NewClient(botCfg.AppID, botCfg.AppSecret, larkws.WithEventHandler(dispatcher))
+		case <-parentCtx.Done():
+			log.Printf("feishu: bot #%d websocket loop stopped during retry wait", idx)
+			return
+		}
+	}
 }
 
 // Ensure Plugin implements queue.Handler

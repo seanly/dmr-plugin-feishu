@@ -8,11 +8,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/seanly/dmr/pkg/plugin/proto"
 )
 
+// jobCleanupDelay is the delay before clearing active job after RunAgent completes.
+// This allows async/subagent tool calls to complete.
+const jobCleanupDelay = 30 * time.Second
+
 // Job is one user message to process serially per chat_id.
 type Job struct {
+	ID               string      // Unique job ID for tracking
 	QueueKey         string
 	TapeName         string
 	ChatID           string
@@ -30,7 +36,7 @@ type Handler interface {
 	ProcessJob(job *Job)
 	GetActiveJobByTape(tapeName string) *Job
 	SetActiveJob(job *Job)
-	ClearActiveJob(tapeName string)
+	ClearActiveJob(tapeName string, jobID string) // jobID for conditional cleanup
 	ComposeRunPrompt(userContent string) string
 	CallRunAgent(tape, prompt string, historyAfter int64) (*proto.RunAgentResponse, error)
 	ReplyAgentOutput(ctx context.Context, job *Job, output string) error
@@ -144,10 +150,22 @@ func ProcessJob(ctx context.Context, handler Handler, job *Job) {
 	if job == nil {
 		return
 	}
-	log.Printf("feishu: processJob tape=%q", job.TapeName)
+	
+	// Assign unique job ID for tracking
+	if job.ID == "" {
+		job.ID = uuid.New().String()
+	}
+	
+	log.Printf("feishu: processJob tape=%q job=%s", job.TapeName, job.ID[:8])
 
 	handler.SetActiveJob(job)
-	defer handler.ClearActiveJob(job.TapeName)
+	
+	// Delay cleanup to allow async/subagent tool calls to complete
+	// Use time.AfterFunc to avoid goroutine leak
+	time.AfterFunc(jobCleanupDelay, func() {
+		handler.ClearActiveJob(job.TapeName, job.ID)
+		log.Printf("feishu: cleared active job after delay tape=%q job=%s", job.TapeName, job.ID[:8])
+	})
 
 	// Comma commands (command plugin InterceptInput) require the prompt to start with "," after trim.
 	userTrim := strings.TrimSpace(job.Content)
@@ -177,6 +195,7 @@ func ProcessJob(ctx context.Context, handler Handler, job *Job) {
 		}
 		_ = handler.ReplyAgentOutput(ctx, job, out)
 	}
+	// Job remains active for jobCleanupDelay after RunAgent returns
 }
 
 // FallbackWhenNoText explains empty agent Output.

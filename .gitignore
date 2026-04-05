@@ -1,32 +1,80 @@
-# Binary (make build)
-dmr-plugin-feishu
+# ============================================
+# Go Binary & Build Artifacts
+# ============================================
+
+# Main binary (make build output)
+/dmr-plugin-feishu
 
 # Cross-build artifacts (make cross-build)
-dmr-plugin-feishu-linux-amd64
-dmr-plugin-feishu-linux-arm64
-dmr-plugin-feishu-darwin-amd64
-dmr-plugin-feishu-darwin-arm64
-dmr-plugin-feishu-windows-amd64.exe
-dmr-plugin-feishu-windows-arm64.exe
+/dmr-plugin-feishu-linux-amd64
+/dmr-plugin-feishu-linux-arm64
+/dmr-plugin-feishu-darwin-amd64
+/dmr-plugin-feishu-darwin-arm64
+/dmr-plugin-feishu-windows-amd64.exe
+/dmr-plugin-feishu-darwin-arm64.exe
 
-# Build output directory
+# Build output directories
 /bin/
 /dist/
 /build/
 
+# IMPORTANT: Do NOT ignore cmd/ directory containing main.go
+# !/cmd/  <- Uncomment if cmd/ is accidentally ignored
+
+# ============================================
 # Go
+# ============================================
+
+# Binaries for programs and plugins
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+
+# Test binary, built with `go test -c`
 *.test
+
+# Output of the go coverage tool
 *.out
+
+# Go vendor directory
 /vendor/
 
-# IDE / OS
+# Go workspace file
+go.work
+
+# ============================================
+# IDE & Editor
+# ============================================
+
 .idea/
 .vscode/
 *.swp
 *.swo
+*~
+
+# ============================================
+# OS
+# ============================================
+
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ============================================
+# Project Specific
+# ============================================
+
+# Local config files (may contain secrets)
+config.local.toml
+*.local.yaml
+*.local.yml
+
+# Debug & profiling
+*.prof
+*.trace

@@ -3,6 +3,7 @@ module github.com/seanly/dmr-plugin-feishu
 go 1.25.0
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/hashicorp/go-plugin v1.7.0
 	github.com/larksuite/oapi-sdk-go/v3 v3.5.3
 	github.com/seanly/dmr v0.0.0

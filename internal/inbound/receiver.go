@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 
@@ -19,6 +20,23 @@ func ShouldSkipRunAgentStandaloneMedia(message *larkim.EventMessage) bool {
 	}
 	mt := StringValue(message.MessageType)
 	return mt == larkim.MsgTypeImage || mt == larkim.MsgTypeFile
+}
+
+// ShouldSkipRunAgentStandaloneMediaGroup is true for group image/file messages with no text.
+// In groups, standalone media without @mention should be ignored.
+func ShouldSkipRunAgentStandaloneMediaGroup(message *larkim.EventMessage) bool {
+	if message == nil {
+		return false
+	}
+	mt := StringValue(message.MessageType)
+	if mt != larkim.MsgTypeImage && mt != larkim.MsgTypeFile {
+		return false
+	}
+	// If there's a parent_id (reply context), don't skip
+	if strings.TrimSpace(StringValue(message.ParentId)) != "" {
+		return false
+	}
+	return true
 }
 
 // Job represents an inbound job.
@@ -45,6 +63,11 @@ type Receiver struct {
 		TryResolveApproval(chatID, content string) bool
 		IsAllowedSender(allowList []string, senderID string) bool
 		EnqueueJob(job *Job)
+		SendTextReply(chatID, text string) error
+		// Group chat support
+		IsGroupEnabledForBot(botInst interface{}) bool
+		GetBotID(botInst interface{}) string
+		GetApproverOpenID(botInst interface{}) string
 	}
 }
 
@@ -77,25 +100,47 @@ func (r *Receiver) HandleMessageReceive(ctx context.Context, botInst interface{}
 		return nil
 	}
 
-	// Build user content
-	userText := r.Plugin.BuildInboundUserContent(ctx, larkClient, message, msgID)
-
-	chatType := StringValue(message.ChatType)
+	// Determine chat type
+	chatType := GetChatType(message)
 	threadKey := StringValue(message.ThreadId)
 	inThread := threadKey != ""
 
-	if chatType != "p2p" {
-		log.Printf("feishu: ignoring non-p2p message (chatType=%q)", chatType)
-		return nil
+	// Route to appropriate handler
+	if IsP2PChat(message) {
+		return r.handleP2PMessage(ctx, botInst, larkClient, allowFrom, event, chatID, senderID, msgID, threadKey, inThread)
 	}
+
+	if IsGroupChat(message) {
+		return r.handleGroupMessage(ctx, botInst, larkClient, allowFrom, event, chatID, senderID, msgID, threadKey, inThread)
+	}
+
+	log.Printf("feishu: unknown chat type (chatType=%q), ignoring", chatType)
+	return nil
+}
+
+// handleP2PMessage handles private chat messages.
+func (r *Receiver) handleP2PMessage(ctx context.Context, botInst interface{}, larkClient *lark.Client, allowFrom []string, event *larkim.P2MessageReceiveV1, chatID, senderID, msgID, threadKey string, inThread bool) error {
+	message := event.Event.Message
+
+	// Build user content
+	userText := r.Plugin.BuildInboundUserContent(ctx, larkClient, message, msgID)
 
 	modelContent := r.Plugin.MergeInboundReplyContext(ctx, larkClient, message, userText)
 	modelPreview := modelContent
 	if modelPreview != TruncateReplyContextBody(modelPreview, 200) {
 		modelPreview = TruncateReplyContextBody(modelPreview, 200) + "…"
 	}
-	log.Printf("feishu: message received chatType=%q chatID=%q senderID=%q msgID=%q modelPreview=%q",
-		chatType, chatID, senderID, msgID, modelPreview)
+	log.Printf("feishu: p2p message received chatID=%q senderID=%q msgID=%q modelPreview=%q",
+		chatID, senderID, msgID, modelPreview)
+
+	// Special command: reply user's open_id and bot's open_id (only in p2p)
+	trimmed := strings.TrimSpace(userText)
+	if trimmed == ",id" || trimmed == ",openid" {
+		botID := r.Plugin.GetBotID(botInst)
+		replyText := fmt.Sprintf("机器人 Open ID:\n`%s`\n\n你的 Open ID:\n`%s`\n\nChat ID:\n`%s`", botID, senderID, chatID)
+		r.Plugin.SendTextReply(chatID, replyText)
+		return nil
+	}
 
 	// Approval replies must not start the agent
 	if r.Plugin.TryResolveApproval(chatID, userText) {
@@ -123,12 +168,80 @@ func (r *Receiver) HandleMessageReceive(ctx context.Context, botInst interface{}
 		SenderID:         senderID,
 		Content:          modelContent,
 		TriggerMessageID: msgID,
-		ChatType:         chatType,
+		ChatType:         "p2p",
 		ThreadKey:        threadKey,
 		InThread:         inThread,
 	}
 
-	log.Printf("feishu: enqueue job tape=%q chatID=%q", tape, chatID)
+	log.Printf("feishu: enqueue p2p job tape=%q chatID=%q", tape, chatID)
+	r.Plugin.EnqueueJob(job)
+	return nil
+}
+
+// handleGroupMessage handles group chat messages.
+func (r *Receiver) handleGroupMessage(ctx context.Context, botInst interface{}, larkClient *lark.Client, allowFrom []string, event *larkim.P2MessageReceiveV1, chatID, senderID, msgID, threadKey string, inThread bool) error {
+	// 0. Check if this bot has group chat enabled
+	if !r.Plugin.IsGroupEnabledForBot(botInst) {
+		log.Printf("feishu: group message ignored (bot group_enabled=false)")
+		return nil
+	}
+
+	message := event.Event.Message
+
+	// 1. Check if bot is mentioned
+	botID := r.Plugin.GetBotID(botInst)
+	mentionInfo := CheckMention(message, botID)
+
+	// Not mentioned at all - ignore
+	if mentionInfo.Type == MentionTypeNone {
+		log.Printf("feishu: group message ignored (bot not mentioned)")
+		return nil
+	}
+
+	// @all - ignore (hardcoded behavior)
+	if mentionInfo.Type == MentionTypeAtAll {
+		log.Printf("feishu: group message ignored (@all)")
+		return nil
+	}
+
+	// 2. Build user content (strip @mentions from text)
+	userText := r.Plugin.BuildInboundUserContent(ctx, larkClient, message, msgID)
+
+	// Strip @bot mentions from the text content
+	cleanText := StripMentionText(userText, message)
+
+	modelContent := r.Plugin.MergeInboundReplyContext(ctx, larkClient, message, cleanText)
+	modelPreview := modelContent
+	if modelPreview != TruncateReplyContextBody(modelPreview, 200) {
+		modelPreview = TruncateReplyContextBody(modelPreview, 200) + "…"
+	}
+	log.Printf("feishu: group message received chatID=%q threadID=%q senderID=%q msgID=%q modelPreview=%q",
+		chatID, threadKey, senderID, msgID, modelPreview)
+
+	// 3. Skip standalone media without meaningful text
+	if ShouldSkipRunAgentStandaloneMediaGroup(message) {
+		log.Printf("feishu: standalone %s in group save-only (no RunAgent)", StringValue(message.MessageType))
+		return nil
+	}
+
+	// 4. Create job with group tape naming
+	tape := TapeNameForGroup(chatID, threadKey)
+	queueKey := QueueKeyForGroup(chatID, threadKey)
+
+	job := &Job{
+		QueueKey:         queueKey,
+		TapeName:         tape,
+		ChatID:           chatID,
+		Bot:              botInst,
+		SenderID:         senderID,
+		Content:          modelContent,
+		TriggerMessageID: msgID,
+		ChatType:         "group",
+		ThreadKey:        threadKey,
+		InThread:         inThread,
+	}
+
+	log.Printf("feishu: enqueue group job tape=%q queue=%q chatID=%q", tape, queueKey, chatID)
 	r.Plugin.EnqueueJob(job)
 	return nil
 }

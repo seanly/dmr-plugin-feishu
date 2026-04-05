@@ -25,6 +25,11 @@ type BotConfig struct {
 	VerificationToken string   `json:"verification_token"`
 	EncryptKey        string   `json:"encrypt_key"`
 	AllowFrom         []string `json:"allow_from"`
+	// GroupEnabled controls whether this bot receives group messages.
+	// Default false (only P2P messages are processed).
+	GroupEnabled bool `json:"group_enabled"`
+	// Approver is the open_id of the admin who receives group chat approvals.
+	Approver string `json:"approver"`
 }
 
 // Config is loaded from the plugin InitRequest.ConfigJSON.
@@ -172,7 +177,7 @@ func parseSizeValue(raw any) int {
 	return 0
 }
 
-// ParseSize parses human-readable size strings like "200MB", "50M", "1GB" to bytes.
+// ParseSize parses human-readable size strings like "200MB", "50M", "1GB", "100B" to bytes.
 func ParseSize(s string) (int64, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -197,6 +202,9 @@ func ParseSize(s string) (int64, error) {
 	} else if strings.HasSuffix(s, "GB") || strings.HasSuffix(s, "G") {
 		multiplier = 1024 * 1024 * 1024
 		s = strings.TrimSuffix(strings.TrimSuffix(s, "GB"), "G")
+	} else if strings.HasSuffix(s, "B") {
+		// Just bytes, multiplier remains 1
+		s = strings.TrimSuffix(s, "B")
 	}
 
 	n, err := strconv.ParseFloat(s, 64)

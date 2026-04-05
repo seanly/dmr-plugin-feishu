@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -14,7 +15,22 @@ import (
 const (
 	maxFeishuTextRunes             = 18000
 	maxFeishuApprovalMarkdownRunes = 14000
+	maxSendRetries                 = 3
 )
+
+// isRetryableError checks if an error is retryable (network/connection errors).
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection") ||
+		strings.Contains(msg, "shut down") ||
+		strings.Contains(msg, "reset") ||
+		strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "EOF")
+}
 
 // MessagePostMD is a custom IM post element for markdown.
 type MessagePostMD struct {
@@ -47,7 +63,7 @@ func BuildFeishuPostMarkdownContent(markdown string) (string, error) {
 	return inner.Build()
 }
 
-// SendTextToChat sends plain text message to chat.
+// SendTextToChat sends plain text message to chat with retry.
 func (c *Client) SendTextToChat(ctx context.Context, chatID, text string) error {
 	if c.Lark == nil {
 		return fmt.Errorf("feishu client not initialized")
@@ -56,26 +72,39 @@ func (c *Client) SendTextToChat(ctx context.Context, chatID, text string) error 
 	if err != nil {
 		return err
 	}
-	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(chatID).
-			MsgType(larkim.MsgTypeText).
-			Content(string(payload)).
-			Uuid(fmt.Sprintf("dmr-feishu-%d", time.Now().UnixNano())).
-			Build()).
-		Build()
-	resp, err := c.Lark.Im.V1.Message.Create(ctx, req)
-	if err != nil {
-		return err
-	}
-	if !resp.Success() {
-		return fmt.Errorf("feishu create message: code=%d msg=%s", resp.Code, resp.Msg)
-	}
-	return nil
-}
 
-// SendMarkdownPostToChat sends markdown post to chat.
+	var lastErr error
+	for attempt := 0; attempt < maxSendRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * time.Second)
+			log.Printf("feishu: SendTextToChat retry %d/%d after error: %v", attempt, maxSendRetries-1, lastErr)
+		}
+
+		req := larkim.NewCreateMessageReqBuilder().
+			ReceiveIdType(larkim.ReceiveIdTypeChatId).
+			Body(larkim.NewCreateMessageReqBodyBuilder().
+				ReceiveId(chatID).
+				MsgType(larkim.MsgTypeText).
+				Content(string(payload)).
+				Uuid(fmt.Sprintf("dmr-feishu-%d-%d", time.Now().UnixNano(), attempt)).
+				Build()).
+			Build()
+		resp, err := c.Lark.Im.V1.Message.Create(ctx, req)
+		if err != nil {
+			lastErr = err
+			if isRetryableError(err) && attempt < maxSendRetries-1 {
+				continue
+			}
+			return err
+		}
+		if !resp.Success() {
+			return fmt.Errorf("feishu create message: code=%d msg=%s", resp.Code, resp.Msg)
+		}
+		return nil
+	}
+	return lastErr
+}
+// SendMarkdownPostToChat sends markdown post to chat with retry.
 func (c *Client) SendMarkdownPostToChat(ctx context.Context, chatID, markdown string) error {
 	if c.Lark == nil {
 		return fmt.Errorf("feishu client not initialized")
@@ -84,24 +113,38 @@ func (c *Client) SendMarkdownPostToChat(ctx context.Context, chatID, markdown st
 	if err != nil {
 		return err
 	}
-	uuid := fmt.Sprintf("dmr-feishu-md-%d", time.Now().UnixNano())
-	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(chatID).
-			MsgType(larkim.MsgTypePost).
-			Content(postContent).
-			Uuid(uuid).
-			Build()).
-		Build()
-	resp, err := c.Lark.Im.V1.Message.Create(ctx, req)
-	if err != nil {
-		return err
+
+	var lastErr error
+	for attempt := 0; attempt < maxSendRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * time.Second)
+			log.Printf("feishu: SendMarkdownPostToChat retry %d/%d after error: %v", attempt, maxSendRetries-1, lastErr)
+		}
+
+		uuid := fmt.Sprintf("dmr-feishu-md-%d-%d", time.Now().UnixNano(), attempt)
+		req := larkim.NewCreateMessageReqBuilder().
+			ReceiveIdType(larkim.ReceiveIdTypeChatId).
+			Body(larkim.NewCreateMessageReqBodyBuilder().
+				ReceiveId(chatID).
+				MsgType(larkim.MsgTypePost).
+				Content(postContent).
+				Uuid(uuid).
+				Build()).
+			Build()
+		resp, err := c.Lark.Im.V1.Message.Create(ctx, req)
+		if err != nil {
+			lastErr = err
+			if isRetryableError(err) && attempt < maxSendRetries-1 {
+				continue
+			}
+			return err
+		}
+		if !resp.Success() {
+			return fmt.Errorf("feishu post create: code=%d msg=%s", resp.Code, resp.Msg)
+		}
+		return nil
 	}
-	if !resp.Success() {
-		return fmt.Errorf("feishu post create: code=%d msg=%s", resp.Code, resp.Msg)
-	}
-	return nil
+	return lastErr
 }
 
 // SendApprovalMessageToChat sends approval message (tries markdown first, then plain).

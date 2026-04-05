@@ -198,12 +198,16 @@ func walkJSONForText(v any, b *strings.Builder) {
 // DMRSubagentTapeSuffix is appended by DMR core to subagent child tapes (parent + ":subagent").
 const DMRSubagentTapeSuffix = ":subagent"
 
-// StripDMRSubagentChildTapeSuffix removes one trailing ":subagent" from the segment after "feishu:p2p:"
-// so Feishu receive_id matches the real p2p chat (e.g. oc_...) instead of "oc_...:subagent".
+// StripDMRSubagentChildTapeSuffix removes all trailing ":subagent" suffixes recursively.
+// This handles nested subagents: "feishu:p2p:xxx:subagent:subagent" -> "feishu:p2p:xxx"
 func StripDMRSubagentChildTapeSuffix(tail string) string {
 	s := strings.TrimSpace(tail)
-	s = strings.TrimSuffix(s, DMRSubagentTapeSuffix)
-	return strings.TrimSpace(s)
+	// Recursively remove all :subagent suffixes to handle nested subagents
+	for strings.HasSuffix(s, DMRSubagentTapeSuffix) {
+		s = strings.TrimSuffix(s, DMRSubagentTapeSuffix)
+		s = strings.TrimSpace(s)
+	}
+	return s
 }
 
 // TapeNameForP2P builds the DMR tape name for private chat (p2p-only plugin).
@@ -240,4 +244,34 @@ func FeishuP2PTapeToChatID(tapeName string) (string, error) {
 		return "", fmt.Errorf("tape_name %q has empty chat id after prefix", tapeName)
 	}
 	return id, nil
+}
+
+// GroupChatIDFromTape extracts chat_id from group tape names.
+// Supports formats:
+//   - feishu:group:<chat_id>:main
+//   - feishu:group:<chat_id>:thread:<thread_id>
+func GroupChatIDFromTape(tape string) (string, bool) {
+	s := strings.TrimSpace(tape)
+	const prefix = "feishu:group:"
+	if !strings.HasPrefix(s, prefix) {
+		return "", false
+	}
+
+	// Remove prefix
+	tail := s[len(prefix):]
+
+	// Extract chat_id (up to first colon)
+	parts := strings.SplitN(tail, ":", 2)
+	if len(parts) == 0 || parts[0] == "" {
+		return "", false
+	}
+
+	chatID := parts[0]
+
+	// Verify it looks like a valid chat_id (oc_*, og_*, etc.)
+	if !strings.Contains(chatID, "_") {
+		return "", false
+	}
+
+	return chatID, true
 }

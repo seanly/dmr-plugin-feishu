@@ -75,6 +75,12 @@ dedup_ttl_minutes = 10
 # allow_from = ["ou_xxx"]                       # required when using dmr_restart_token
 # dmr_restart_trigger = ",dmr-restart"          # default; first line of message must start with this
 # dmr_restart_token = "long-random-secret"      # message: ",dmr-restart long-random-secret"
+# optional — group chat support (per-bot, default off)
+# [[plugins.config.bots]]
+# app_id = "cli_xxx"
+# app_secret = "xxx"
+# group_enabled = true                          # set true to enable @mention triggers in group chats
+# approver = "ou_xxx"                           # admin open_id for group chat approvals
 ```
 
 Plugin `config` is passed through DMR as JSON; field names match the struct tags below. Legacy keys such as `group_trigger` in TOML are ignored if present in the JSON subset DMR sends.
@@ -105,6 +111,8 @@ Plugin `config` is passed through DMR as JSON; field names match the struct tags
 | `extra_prompt_file` | Optional path to a UTF-8 file. **Relative paths** are resolved against DMR’s injected **`config_base_dir`** (the directory containing your main `config.toml`). Loaded at plugin **Init**; content is placed **before** `extra_prompt` when both are set. |
 | `dmr_restart_trigger` | Prefix for the admin restart line (default `,dmr-restart`). Only the **first line** of the message is checked. |
 | `dmr_restart_token` | If non-empty, enables restart: send a p2p message whose first line is `<dmr_restart_trigger> <token>` to trigger **`dmr serve service restart`** on the DMR host. **Requires non-empty `allow_from`.** High risk — use a long random token. |
+| `bots[].group_enabled` | Default **`false`**. When `true`, this bot receives group chat @mention triggers. |
+| `bots[].approver` | Open ID of the admin who receives group chat approvals. P2P chat_id is auto-resolved. |
 
 ### Feishu-only extra prompt (limitations)
 
