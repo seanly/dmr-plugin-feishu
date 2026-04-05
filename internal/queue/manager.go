@@ -1,4 +1,4 @@
-package main
+package queue
 
 import (
 	"context"
@@ -11,13 +11,12 @@ import (
 	"github.com/seanly/dmr/pkg/plugin/proto"
 )
 
-// inboundJob is one user message to process serially per chat_id.
-type inboundJob struct {
-	QueueKey string // same as TapeName; kept for logs
-	TapeName string
-
+// Job is one user message to process serially per chat_id.
+type Job struct {
+	QueueKey         string
+	TapeName         string
 	ChatID           string
-	Bot              *BotInstance // the bot instance that received this message
+	Bot              interface{} // *bot.Instance - use interface to avoid import cycle
 	SenderID         string
 	Content          string
 	TriggerMessageID string
@@ -26,23 +25,37 @@ type inboundJob struct {
 	InThread         bool
 }
 
-type queueManager struct {
-	plugin *FeishuPlugin
+// Handler is the callback to process a job.
+type Handler interface {
+	ProcessJob(job *Job)
+	GetActiveJobByTape(tapeName string) *Job
+	SetActiveJob(job *Job)
+	ClearActiveJob(tapeName string)
+	ComposeRunPrompt(userContent string) string
+	CallRunAgent(tape, prompt string, historyAfter int64) (*proto.RunAgentResponse, error)
+	ReplyAgentOutput(ctx context.Context, job *Job, output string) error
+}
+
+// Manager manages per-chat job queues.
+type Manager struct {
+	handler Handler
 
 	mu      sync.Mutex
-	workers map[string]chan *inboundJob // chat_id -> per-chat job channel
+	workers map[string]chan *Job // chat_id -> per-chat job channel
 	closed  bool
 	wg      sync.WaitGroup
 }
 
-func newQueueManager(p *FeishuPlugin) *queueManager {
-	return &queueManager{
-		plugin:  p,
-		workers: make(map[string]chan *inboundJob),
+// NewManager creates a new queue manager.
+func NewManager(handler Handler) *Manager {
+	return &Manager{
+		handler: handler,
+		workers: make(map[string]chan *Job),
 	}
 }
 
-func (qm *queueManager) enqueue(job *inboundJob) {
+// Enqueue adds a job to the appropriate queue.
+func (qm *Manager) Enqueue(job *Job) {
 	if job == nil || job.ChatID == "" {
 		return
 	}
@@ -55,7 +68,7 @@ func (qm *queueManager) enqueue(job *inboundJob) {
 
 	ch, exists := qm.workers[job.ChatID]
 	if !exists {
-		ch = make(chan *inboundJob, 16)
+		ch = make(chan *Job, 16)
 		qm.workers[job.ChatID] = ch
 		qm.wg.Add(1)
 		go qm.runWorkerForChat(job.ChatID, ch)
@@ -70,7 +83,7 @@ func (qm *queueManager) enqueue(job *inboundJob) {
 	}
 }
 
-func (qm *queueManager) runWorkerForChat(chatID string, jobs <-chan *inboundJob) {
+func (qm *Manager) runWorkerForChat(chatID string, jobs <-chan *Job) {
 	defer qm.wg.Done()
 	defer func() {
 		qm.mu.Lock()
@@ -92,7 +105,7 @@ func (qm *queueManager) runWorkerForChat(chatID string, jobs <-chan *inboundJob)
 			if job != nil {
 				log.Printf("feishu: worker processing chat_id=%q tape=%q msgID=%q",
 					chatID, job.TapeName, job.TriggerMessageID)
-				qm.plugin.processJob(job)
+				qm.handler.ProcessJob(job)
 			}
 			if !timer.Stop() {
 				select {
@@ -109,7 +122,8 @@ func (qm *queueManager) runWorkerForChat(chatID string, jobs <-chan *inboundJob)
 	}
 }
 
-func (qm *queueManager) shutdownAll() {
+// ShutdownAll stops all queue workers.
+func (qm *Manager) ShutdownAll() {
 	qm.mu.Lock()
 	if qm.closed {
 		qm.mu.Unlock()
@@ -125,51 +139,48 @@ func (qm *queueManager) shutdownAll() {
 	log.Printf("feishu: all queue workers stopped")
 }
 
-func (p *FeishuPlugin) processJob(job *inboundJob) {
+// ProcessJob wraps the handler's process job with standard logic.
+func ProcessJob(ctx context.Context, handler Handler, job *Job) {
 	if job == nil {
 		return
 	}
-	ctx := context.Background()
 	log.Printf("feishu: processJob tape=%q", job.TapeName)
 
-	p.setActiveJob(job)
-	defer p.clearActiveJob(job.TapeName)
+	handler.SetActiveJob(job)
+	defer handler.ClearActiveJob(job.TapeName)
 
-	// HistoryAfterEntryID 0 => DMR uses default tape read (LastAnchorContext); no plugin-side TapeHandoff.
 	// Comma commands (command plugin InterceptInput) require the prompt to start with "," after trim.
-	// composeRunPrompt prefixes Feishu hints, which would hide a leading ",help" etc. from intercept.
 	userTrim := strings.TrimSpace(job.Content)
-	runPrompt := p.composeRunPrompt(job.Content)
+	runPrompt := handler.ComposeRunPrompt(job.Content)
 	if strings.HasPrefix(userTrim, ",") || strings.HasPrefix(userTrim, "，") {
 		if strings.HasPrefix(userTrim, "，") {
 			userTrim = "," + strings.TrimPrefix(userTrim, "，")
 		}
 		runPrompt = userTrim
 	}
-	resp, err := p.callRunAgent(job.TapeName, runPrompt, 0)
+	resp, err := handler.CallRunAgent(job.TapeName, runPrompt, 0)
 	if err != nil {
 		log.Printf("feishu: RunAgent RPC error: %v", err)
-		_ = p.replyAgentOutput(ctx, job, "DMR: RunAgent failed: "+err.Error())
+		_ = handler.ReplyAgentOutput(ctx, job, "DMR: RunAgent failed: "+err.Error())
 		return
 	}
 	if resp == nil {
 		return
 	}
 	if resp.Error != "" {
-		_ = p.replyAgentOutput(ctx, job, "DMR error: "+resp.Error)
+		_ = handler.ReplyAgentOutput(ctx, job, "DMR error: "+resp.Error)
 	} else {
 		out := resp.Output
 		if out == "" {
-			out = feishuFallbackWhenNoText(job.TapeName, resp)
+			out = FallbackWhenNoText(job.TapeName, resp)
 			log.Printf("feishu: RunAgent empty output tape=%q steps=%d toolCalls=%d", job.TapeName, resp.Steps, len(resp.ToolCalls))
 		}
-		_ = p.replyAgentOutput(ctx, job, out)
+		_ = handler.ReplyAgentOutput(ctx, job, out)
 	}
 }
 
-// feishuFallbackWhenNoText explains empty agent Output: models sometimes finish with tool calls only
-// (e.g. after feishuSendFile). RunAgent still succeeds with Output==""; avoid a bare "(no output)".
-func feishuFallbackWhenNoText(tape string, resp *proto.RunAgentResponse) string {
+// FallbackWhenNoText explains empty agent Output.
+func FallbackWhenNoText(tape string, resp *proto.RunAgentResponse) string {
 	if resp == nil {
 		return "(no output)"
 	}

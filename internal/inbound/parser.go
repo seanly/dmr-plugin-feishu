@@ -1,4 +1,4 @@
-package main
+package inbound
 
 import (
 	"encoding/json"
@@ -10,24 +10,26 @@ import (
 
 // ParsedInbound summarizes a Feishu IM message for RunAgent user text.
 type ParsedInbound struct {
-	MsgType     string // lark MsgType* string or empty
-	TextBody    string // plain text for msg_type text
-	ImageKey    string
-	FileKey     string
-	FileName    string
-	PostPlain   string // best-effort plaintext from post
-	RawContent  string // original content JSON when not plain text
-	NeedsDownload bool // image or file with a resource key
+	MsgType       string // lark MsgType* string or empty
+	TextBody      string // plain text for msg_type text
+	ImageKey      string
+	FileKey       string
+	FileName      string
+	PostPlain     string // best-effort plaintext from post
+	RawContent    string // original content JSON when not plain text
+	NeedsDownload bool   // image or file with a resource key
 }
 
-func (p ParsedInbound) resourceKey() string {
+// ResourceKey returns file_key if set, otherwise image_key.
+func (p ParsedInbound) ResourceKey() string {
 	if p.FileKey != "" {
 		return p.FileKey
 	}
 	return p.ImageKey
 }
 
-func messageResourceType(parsed ParsedInbound) string {
+// MessageResourceType returns the resource type for download.
+func MessageResourceType(parsed ParsedInbound) string {
 	if parsed.MsgType == larkim.MsgTypeImage {
 		return "image"
 	}
@@ -37,14 +39,16 @@ func messageResourceType(parsed ParsedInbound) string {
 	return ""
 }
 
-func stringValue(p *string) string {
+// StringValue safely dereferences a string pointer.
+func StringValue(p *string) string {
 	if p == nil {
 		return ""
 	}
 	return *p
 }
 
-func extractFeishuSenderID(sender *larkim.EventSender) string {
+// ExtractFeishuSenderID extracts sender ID from event.
+func ExtractFeishuSenderID(sender *larkim.EventSender) string {
 	if sender == nil || sender.SenderId == nil {
 		return ""
 	}
@@ -60,19 +64,20 @@ func extractFeishuSenderID(sender *larkim.EventSender) string {
 	return ""
 }
 
-func extractFeishuMessageContent(message *larkim.EventMessage) string {
-	parsed := parseFeishuInboundMessage(message)
+// ExtractFeishuMessageContent extracts display content from message.
+func ExtractFeishuMessageContent(message *larkim.EventMessage) string {
+	parsed := ParseFeishuInboundMessage(message)
 	if parsed.MsgType == larkim.MsgTypeText && parsed.TextBody != "" {
 		return parsed.TextBody
 	}
 	if parsed.MsgType == larkim.MsgTypeText {
 		return parsed.RawContent
 	}
-	return formatInboundSummary(parsed)
+	return FormatInboundSummary(parsed)
 }
 
-// parseFeishuInboundMessage classifies msg_type and extracts keys / post text.
-func parseFeishuInboundMessage(message *larkim.EventMessage) ParsedInbound {
+// ParseFeishuInboundMessage classifies msg_type and extracts keys / post text.
+func ParseFeishuInboundMessage(message *larkim.EventMessage) ParsedInbound {
 	var out ParsedInbound
 	if message == nil || message.Content == nil {
 		return out
@@ -115,14 +120,15 @@ func parseFeishuInboundMessage(message *larkim.EventMessage) ParsedInbound {
 		}
 		out.NeedsDownload = out.FileKey != ""
 	case larkim.MsgTypePost:
-		out.PostPlain = extractPostPlainText([]byte(raw))
+		out.PostPlain = ExtractPostPlainText([]byte(raw))
 	default:
 		// leave RawContent
 	}
 	return out
 }
 
-func formatInboundSummary(parsed ParsedInbound) string {
+// FormatInboundSummary formats parsed message as human-readable summary.
+func FormatInboundSummary(parsed ParsedInbound) string {
 	if parsed.MsgType == larkim.MsgTypePost {
 		s := "[Feishu inbound — msg_type=post]\n"
 		if parsed.PostPlain != "" {
@@ -159,7 +165,8 @@ func formatInboundSummary(parsed ParsedInbound) string {
 	return strings.TrimSpace(b.String())
 }
 
-func extractPostPlainText(data []byte) string {
+// ExtractPostPlainText extracts plain text from a post message.
+func ExtractPostPlainText(data []byte) string {
 	var v any
 	if err := json.Unmarshal(data, &v); err != nil {
 		return ""
@@ -188,30 +195,49 @@ func walkJSONForText(v any, b *strings.Builder) {
 	}
 }
 
-// dmrSubagentTapeSuffix is appended by DMR core to subagent child tapes (parent + ":subagent").
-const dmrSubagentTapeSuffix = ":subagent"
+// DMRSubagentTapeSuffix is appended by DMR core to subagent child tapes (parent + ":subagent").
+const DMRSubagentTapeSuffix = ":subagent"
 
-// stripDMRSubagentChildTapeSuffix removes one trailing ":subagent" from the segment after "feishu:p2p:"
+// StripDMRSubagentChildTapeSuffix removes one trailing ":subagent" from the segment after "feishu:p2p:"
 // so Feishu receive_id matches the real p2p chat (e.g. oc_...) instead of "oc_...:subagent".
-func stripDMRSubagentChildTapeSuffix(tail string) string {
+func StripDMRSubagentChildTapeSuffix(tail string) string {
 	s := strings.TrimSpace(tail)
-	s = strings.TrimSuffix(s, dmrSubagentTapeSuffix)
+	s = strings.TrimSuffix(s, DMRSubagentTapeSuffix)
 	return strings.TrimSpace(s)
 }
 
-// tapeNameForP2P builds the DMR tape name for private chat (p2p-only plugin).
-func tapeNameForP2P(chatID string) string {
+// TapeNameForP2P builds the DMR tape name for private chat (p2p-only plugin).
+func TapeNameForP2P(chatID string) string {
 	return "feishu:p2p:" + chatID
 }
 
-func p2pChatIDFromTape(tape string) (chatID string, ok bool) {
+// P2PChatIDFromTape extracts chat_id from tape name.
+func P2PChatIDFromTape(tape string) (chatID string, ok bool) {
 	const p = "feishu:p2p:"
 	if !strings.HasPrefix(tape, p) {
 		return "", false
 	}
-	id := stripDMRSubagentChildTapeSuffix(tape[len(p):])
+	id := StripDMRSubagentChildTapeSuffix(tape[len(p):])
 	if id == "" {
 		return "", false
 	}
 	return id, true
+}
+
+// FeishuP2PTapeToChatID returns the chat_id from tape name "feishu:p2p:<chat_id>".
+// DMR subagent runs use "feishu:p2p:<chat_id>:subagent"; the ":subagent" suffix is stripped.
+func FeishuP2PTapeToChatID(tapeName string) (string, error) {
+	s := strings.TrimSpace(tapeName)
+	if s == "" {
+		return "", fmt.Errorf("tape_name is empty")
+	}
+	const prefix = "feishu:p2p:"
+	if !strings.HasPrefix(s, prefix) {
+		return "", fmt.Errorf("tape_name must start with %q (got %q)", prefix, tapeName)
+	}
+	id := StripDMRSubagentChildTapeSuffix(s[len(prefix):])
+	if id == "" {
+		return "", fmt.Errorf("tape_name %q has empty chat id after prefix", tapeName)
+	}
+	return id, nil
 }

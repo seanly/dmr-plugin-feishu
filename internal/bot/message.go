@@ -1,59 +1,58 @@
-package main
+package bot
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
-	"strings"
 	"time"
-	"unicode/utf8"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
+	"github.com/seanly/dmr-plugin-feishu/pkg/utils"
 )
 
 const (
-	maxFeishuTextRunes            = 18000
-	maxFeishuApprovalMarkdownRunes = 14000 // post body ~30KB limit; stay conservative
+	maxFeishuTextRunes             = 18000
+	maxFeishuApprovalMarkdownRunes = 14000
 )
 
-// messagePostMD is a custom IM post element that lets Feishu parse markdown inside rich text.
-// Feishu "post" supports a node with: { "tag": "md", "text": "<markdown>" }.
-type messagePostMD struct {
+// MessagePostMD is a custom IM post element for markdown.
+type MessagePostMD struct {
 	Text string `json:"text,omitempty"`
 }
 
-func (m *messagePostMD) Tag() string { return "md" }
-func (m *messagePostMD) IsPost()    {}
-func (m *messagePostMD) MarshalJSON() ([]byte, error) {
+// Tag returns the element tag.
+func (m *MessagePostMD) Tag() string { return "md" }
+
+// IsPost marks this as a post element.
+func (m *MessagePostMD) IsPost() {}
+
+// MarshalJSON implements json.Marshaler.
+func (m *MessagePostMD) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]any{
 		"tag":  "md",
 		"text": m.Text,
 	})
 }
 
-func buildFeishuPostMarkdownContent(markdown string) (string, error) {
-	// Feishu expects: content = JSON-serialized string, whose JSON includes { "post": { ... } }.
+// BuildFeishuPostMarkdownContent builds post content with markdown.
+func BuildFeishuPostMarkdownContent(markdown string) (string, error) {
 	inner := larkim.NewMessagePost().ZhCn(
 		larkim.NewMessagePostContent().
 			ContentTitle("").
 			AppendContent([]larkim.MessagePostElement{
-				&messagePostMD{Text: markdown},
+				&MessagePostMD{Text: markdown},
 			}),
 	)
-
-	innerStr, err := inner.Build()
-	if err != nil {
-		return "", err
-	}
-	return innerStr, nil
+	return inner.Build()
 }
 
-func (b *BotInstance) sendTextToChat(ctx context.Context, chatID, text string) error {
-	if b.lc == nil {
+// SendTextToChat sends plain text message to chat.
+func (c *Client) SendTextToChat(ctx context.Context, chatID, text string) error {
+	if c.Lark == nil {
 		return fmt.Errorf("feishu client not initialized")
 	}
-	payload, err := json.Marshal(map[string]string{"text": truncateRunes(text, maxFeishuTextRunes)})
+	payload, err := json.Marshal(map[string]string{"text": utils.TruncateRunes(text, maxFeishuTextRunes)})
 	if err != nil {
 		return err
 	}
@@ -66,7 +65,7 @@ func (b *BotInstance) sendTextToChat(ctx context.Context, chatID, text string) e
 			Uuid(fmt.Sprintf("dmr-feishu-%d", time.Now().UnixNano())).
 			Build()).
 		Build()
-	resp, err := b.lc.Im.V1.Message.Create(ctx, req)
+	resp, err := c.Lark.Im.V1.Message.Create(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -76,13 +75,12 @@ func (b *BotInstance) sendTextToChat(ctx context.Context, chatID, text string) e
 	return nil
 }
 
-// sendMarkdownPostToChat sends msg_type=post with a single zh_cn "md" node (standard Markdown).
-// Caller should cap markdown length if needed; this does not truncate.
-func (b *BotInstance) sendMarkdownPostToChat(ctx context.Context, chatID, markdown string) error {
-	if b.lc == nil {
+// SendMarkdownPostToChat sends markdown post to chat.
+func (c *Client) SendMarkdownPostToChat(ctx context.Context, chatID, markdown string) error {
+	if c.Lark == nil {
 		return fmt.Errorf("feishu client not initialized")
 	}
-	postContent, err := buildFeishuPostMarkdownContent(markdown)
+	postContent, err := BuildFeishuPostMarkdownContent(markdown)
 	if err != nil {
 		return err
 	}
@@ -96,7 +94,7 @@ func (b *BotInstance) sendMarkdownPostToChat(ctx context.Context, chatID, markdo
 			Uuid(uuid).
 			Build()).
 		Build()
-	resp, err := b.lc.Im.V1.Message.Create(ctx, req)
+	resp, err := c.Lark.Im.V1.Message.Create(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -106,29 +104,37 @@ func (b *BotInstance) sendMarkdownPostToChat(ctx context.Context, chatID, markdo
 	return nil
 }
 
-// sendApprovalMessageToChat tries post+md first, then falls back to plain text.
-func (b *BotInstance) sendApprovalMessageToChat(ctx context.Context, chatID, markdown string) error {
-	md := truncateRunes(markdown, maxFeishuApprovalMarkdownRunes)
-	if err := b.sendMarkdownPostToChat(ctx, chatID, md); err != nil {
+// SendApprovalMessageToChat sends approval message (tries markdown first, then plain).
+func (c *Client) SendApprovalMessageToChat(ctx context.Context, chatID, markdown string) error {
+	md := utils.TruncateRunes(markdown, maxFeishuApprovalMarkdownRunes)
+	if err := c.SendMarkdownPostToChat(ctx, chatID, md); err != nil {
 		log.Printf("feishu: approval post/md failed, fallback text: %v", err)
-		return b.sendTextToChat(ctx, chatID, md)
+		return c.SendTextToChat(ctx, chatID, md)
 	}
 	return nil
 }
 
-func (p *FeishuPlugin) replyAgentOutput(ctx context.Context, job *inboundJob, output string) error {
-	text := truncateRunes(output, maxFeishuTextRunes)
-	return job.Bot.deliverIMTextForJob(ctx, job, text, true)
+// DeliverIMTextToP2PChat sends a new message to a p2p chat by chat_id.
+func (c *Client) DeliverIMTextToP2PChat(ctx context.Context, chatID, text string, preferMarkdown bool) error {
+	if chatID == "" {
+		return fmt.Errorf("feishu: empty chat_id")
+	}
+	if preferMarkdown {
+		md := utils.TruncateRunes(text, maxFeishuTextRunes)
+		if err := c.SendMarkdownPostToChat(ctx, chatID, md); err != nil {
+			log.Printf("feishu: send_text post/md failed, fallback text: %v", err)
+			return c.SendTextToChat(ctx, chatID, md)
+		}
+		return nil
+	}
+	return c.SendTextToChat(ctx, chatID, text)
 }
 
-// deliverIMTextForJob sends text to the same destination as replyAgentOutput (thread vs main chat).
+// DeliverIMTextForJob sends text to the same destination (thread vs main chat).
 // preferMarkdown: when true, try Feishu post+md first then plain text; when false, send plain text only.
-func (b *BotInstance) deliverIMTextForJob(ctx context.Context, job *inboundJob, text string, preferMarkdown bool) error {
-	if b.lc == nil {
+func (c *Client) DeliverIMTextForJob(ctx context.Context, chatID, triggerMessageID string, inThread bool, text string, preferMarkdown bool) error {
+	if c.Lark == nil {
 		return fmt.Errorf("feishu client not initialized")
-	}
-	if job == nil {
-		return fmt.Errorf("feishu: nil inbound job")
 	}
 
 	textPayload, err := json.Marshal(map[string]string{"text": text})
@@ -137,7 +143,7 @@ func (b *BotInstance) deliverIMTextForJob(ctx context.Context, job *inboundJob, 
 	}
 	uuid := fmt.Sprintf("dmr-feishu-%d", time.Now().UnixNano())
 
-	if job.InThread && job.TriggerMessageID != "" {
+	if inThread && triggerMessageID != "" {
 		if !preferMarkdown {
 			body := larkim.NewReplyMessageReqBodyBuilder().
 				MsgType(larkim.MsgTypeText).
@@ -146,10 +152,10 @@ func (b *BotInstance) deliverIMTextForJob(ctx context.Context, job *inboundJob, 
 				Uuid(uuid).
 				Build()
 			req := larkim.NewReplyMessageReqBuilder().
-				MessageId(job.TriggerMessageID).
+				MessageId(triggerMessageID).
 				Body(body).
 				Build()
-			resp, err := b.lc.Im.V1.Message.Reply(ctx, req)
+			resp, err := c.Lark.Im.V1.Message.Reply(ctx, req)
 			if err != nil {
 				return err
 			}
@@ -158,8 +164,8 @@ func (b *BotInstance) deliverIMTextForJob(ctx context.Context, job *inboundJob, 
 			}
 			return nil
 		}
-		// Try rich post with markdown first; fallback to plain text.
-		postContent, postErr := buildFeishuPostMarkdownContent(text)
+		// Try rich post with markdown first
+		postContent, postErr := BuildFeishuPostMarkdownContent(text)
 		if postErr == nil {
 			body := larkim.NewReplyMessageReqBodyBuilder().
 				MsgType(larkim.MsgTypePost).
@@ -168,10 +174,10 @@ func (b *BotInstance) deliverIMTextForJob(ctx context.Context, job *inboundJob, 
 				Uuid(uuid).
 				Build()
 			req := larkim.NewReplyMessageReqBuilder().
-				MessageId(job.TriggerMessageID).
+				MessageId(triggerMessageID).
 				Body(body).
 				Build()
-			resp, err := b.lc.Im.V1.Message.Reply(ctx, req)
+			resp, err := c.Lark.Im.V1.Message.Reply(ctx, req)
 			if err == nil && resp != nil && resp.Success() {
 				return nil
 			}
@@ -189,10 +195,10 @@ func (b *BotInstance) deliverIMTextForJob(ctx context.Context, job *inboundJob, 
 			Uuid(uuid).
 			Build()
 		req := larkim.NewReplyMessageReqBuilder().
-			MessageId(job.TriggerMessageID).
+			MessageId(triggerMessageID).
 			Body(body).
 			Build()
-		resp, err := b.lc.Im.V1.Message.Reply(ctx, req)
+		resp, err := c.Lark.Im.V1.Message.Reply(ctx, req)
 		if err != nil {
 			return err
 		}
@@ -202,17 +208,18 @@ func (b *BotInstance) deliverIMTextForJob(ctx context.Context, job *inboundJob, 
 		return nil
 	}
 
+	// Not in thread - create new message
 	if !preferMarkdown {
 		req := larkim.NewCreateMessageReqBuilder().
 			ReceiveIdType(larkim.ReceiveIdTypeChatId).
 			Body(larkim.NewCreateMessageReqBodyBuilder().
-				ReceiveId(job.ChatID).
+				ReceiveId(chatID).
 				MsgType(larkim.MsgTypeText).
 				Content(string(textPayload)).
 				Uuid(uuid).
 				Build()).
 			Build()
-		resp, err := b.lc.Im.V1.Message.Create(ctx, req)
+		resp, err := c.Lark.Im.V1.Message.Create(ctx, req)
 		if err != nil {
 			return err
 		}
@@ -222,19 +229,19 @@ func (b *BotInstance) deliverIMTextForJob(ctx context.Context, job *inboundJob, 
 		return nil
 	}
 
-	// Try rich post with markdown first; fallback to plain text.
-	postContent, postErr := buildFeishuPostMarkdownContent(text)
+	// Try rich post with markdown first
+	postContent, postErr := BuildFeishuPostMarkdownContent(text)
 	if postErr == nil {
 		req := larkim.NewCreateMessageReqBuilder().
 			ReceiveIdType(larkim.ReceiveIdTypeChatId).
 			Body(larkim.NewCreateMessageReqBodyBuilder().
-				ReceiveId(job.ChatID).
+				ReceiveId(chatID).
 				MsgType(larkim.MsgTypePost).
 				Content(postContent).
 				Uuid(uuid).
 				Build()).
 			Build()
-		resp, err := b.lc.Im.V1.Message.Create(ctx, req)
+		resp, err := c.Lark.Im.V1.Message.Create(ctx, req)
 		if err == nil && resp != nil && resp.Success() {
 			return nil
 		}
@@ -248,13 +255,13 @@ func (b *BotInstance) deliverIMTextForJob(ctx context.Context, job *inboundJob, 
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(larkim.ReceiveIdTypeChatId).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(job.ChatID).
+			ReceiveId(chatID).
 			MsgType(larkim.MsgTypeText).
 			Content(string(textPayload)).
 			Uuid(uuid).
 			Build()).
 		Build()
-	resp, err := b.lc.Im.V1.Message.Create(ctx, req)
+	resp, err := c.Lark.Im.V1.Message.Create(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -262,35 +269,4 @@ func (b *BotInstance) deliverIMTextForJob(ctx context.Context, job *inboundJob, 
 		return fmt.Errorf("feishu create message: code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
-}
-
-// deliverIMTextToP2PChat sends a new message to a p2p chat by chat_id (no thread context).
-// Used when RunAgent was not triggered from Feishu (e.g. cron) so there is no active inboundJob.
-func (b *BotInstance) deliverIMTextToP2PChat(ctx context.Context, chatID, text string, preferMarkdown bool) error {
-	if strings.TrimSpace(chatID) == "" {
-		return fmt.Errorf("feishu: empty chat_id")
-	}
-	if preferMarkdown {
-		md := truncateRunes(text, maxFeishuTextRunes)
-		if err := b.sendMarkdownPostToChat(ctx, chatID, md); err != nil {
-			log.Printf("feishu: send_text post/md failed, fallback text: %v", err)
-			return b.sendTextToChat(ctx, chatID, md)
-		}
-		return nil
-	}
-	return b.sendTextToChat(ctx, chatID, text)
-}
-
-func truncateRunes(s string, maxRunes int) string {
-	if maxRunes <= 0 {
-		return ""
-	}
-	if utf8.RuneCountInString(s) <= maxRunes {
-		return s
-	}
-	runes := []rune(s)
-	if len(runes) > maxRunes {
-		s = string(runes[:maxRunes]) + "\n\n…(truncated)"
-	}
-	return s
 }

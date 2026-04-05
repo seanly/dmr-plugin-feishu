@@ -1,10 +1,8 @@
-package main
+package bot
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,10 +14,10 @@ import (
 
 // Approval choice values (match dmr plugin.ApprovalChoice / proto).
 const (
-	choiceDenied         int32 = 0
-	choiceApprovedOnce   int32 = 1
-	choiceApprovedSess   int32 = 2
-	choiceApprovedAlways int32 = 3
+	ChoiceDenied         int32 = 0
+	ChoiceApprovedOnce   int32 = 1
+	ChoiceApprovedSess   int32 = 2
+	ChoiceApprovedAlways int32 = 3
 )
 
 const (
@@ -28,76 +26,75 @@ const (
 	maxApprovalRestJSONRunes      = 6000
 )
 
-// feishuApprovalReply is sent when the user responds in DM.
-// For batch: indices == nil means approve all items (y/s/a); non-nil means partial (CLI-style 1,3,5).
-type feishuApprovalReply struct {
-	choice  int32
-	indices []int32
-	comment string
+// ApprovalReply is sent when the user responds in DM.
+type ApprovalReply struct {
+	Choice  int32
+	Indices []int32
+	Comment string
 }
 
-type approvalWait struct {
-	ch     chan feishuApprovalReply
-	batchN int // 0 = single tool approval; >0 = batch size (enables 1,3,5 parsing)
+// ApprovalWait holds the wait state for an approval.
+type ApprovalWait struct {
+	Ch     chan ApprovalReply
+	BatchN int // 0 = single tool approval; >0 = batch size
 }
 
-// FeishuApprover handles require_approval for private chat (feishu:p2p:*) tapes only.
-type FeishuApprover struct {
-	plugin *FeishuPlugin
-	bot    *BotInstance
-	mu     sync.Mutex
-	wait   map[string]*approvalWait // p2p chat_id -> wait state
+// Approver handles require_approval for private chat.
+type Approver struct {
+	Plugin interface {
+		GetBotForChat(chatID string) (*Instance, error)
+	}
+	Mu   sync.Mutex
+	Wait map[string]*ApprovalWait // p2p chat_id -> wait state
 }
 
-func newFeishuApprover(p *FeishuPlugin, bot *BotInstance) *FeishuApprover {
-	return &FeishuApprover{
-		plugin: p,
-		bot:    bot,
-		wait:   make(map[string]*approvalWait),
+// NewApprover creates a new approver for the bot instance.
+func NewApprover(plugin interface {
+	GetBotForChat(chatID string) (*Instance, error)
+}) *Approver {
+	return &Approver{
+		Plugin: plugin,
+		Wait:   make(map[string]*ApprovalWait),
 	}
 }
 
-func parseApprovalChoice(content string) (int32, string, bool) {
-	// Split by "//" to separate choice from comment
+// ParseApprovalChoice parses a single approval choice.
+func ParseApprovalChoice(content string) (int32, string, bool) {
 	choice, comment := splitByCommentMarker(content)
 	s := strings.TrimSpace(strings.ToLower(choice))
 
 	if s == "" {
-		return choiceDenied, comment, true
+		return ChoiceDenied, comment, true
 	}
 	if utf8.RuneCountInString(s) == 1 {
 		switch s[0] {
 		case 'y':
-			return choiceApprovedOnce, comment, true
+			return ChoiceApprovedOnce, comment, true
 		case 's':
-			return choiceApprovedSess, comment, true
+			return ChoiceApprovedSess, comment, true
 		case 'a':
-			return choiceApprovedAlways, comment, true
+			return ChoiceApprovedAlways, comment, true
 		case 'n':
-			return choiceDenied, comment, true
+			return ChoiceDenied, comment, true
 		default:
-			return choiceDenied, comment, true
+			return ChoiceDenied, comment, true
 		}
 	}
 	switch s {
 	case "yes":
-		return choiceApprovedOnce, comment, true
+		return ChoiceApprovedOnce, comment, true
 	case "session":
-		return choiceApprovedSess, comment, true
+		return ChoiceApprovedSess, comment, true
 	case "always":
-		return choiceApprovedAlways, comment, true
+		return ChoiceApprovedAlways, comment, true
 	case "no":
-		return choiceDenied, comment, true
+		return ChoiceDenied, comment, true
 	default:
-		return choiceDenied, comment, true
+		return ChoiceDenied, comment, true
 	}
 }
 
 // splitByCommentMarker splits input by "//" into choice and comment.
-// Examples:
-//   "y // all good" -> ("y", "all good")
-//   "1,3 // approved" -> ("1,3", "approved")
-//   "n" -> ("n", "")
 func splitByCommentMarker(input string) (choice string, comment string) {
 	parts := strings.SplitN(input, "//", 2)
 	choice = strings.TrimSpace(parts[0])
@@ -107,35 +104,32 @@ func splitByCommentMarker(input string) (choice string, comment string) {
 	return
 }
 
-// parseBatchApprovalChoice mirrors plugins/cliapprover readBatchChoice: y/yes, s/session, a/always, n/no,
-// or comma-separated 1-based indices (e.g. 1,3,5). Empty or any other input denies (consumed), same safe default as CLI.
-// Also supports comments after "//": "n // security concern" or "1,3 // looks good".
-func parseBatchApprovalChoice(content string, total int) (feishuApprovalReply, bool) {
-	// Split by "//" to separate choice from comment
+// ParseBatchApprovalChoice parses batch approval choice.
+func ParseBatchApprovalChoice(content string, total int) (ApprovalReply, bool) {
 	choice, comment := splitByCommentMarker(content)
 	s := strings.TrimSpace(strings.ToLower(choice))
 
 	if s == "" {
-		return feishuApprovalReply{choice: choiceDenied, comment: comment}, true
+		return ApprovalReply{Choice: ChoiceDenied, Comment: comment}, true
 	}
 	switch s {
 	case "y", "yes":
-		return feishuApprovalReply{choice: choiceApprovedOnce, comment: comment}, true
+		return ApprovalReply{Choice: ChoiceApprovedOnce, Comment: comment}, true
 	case "s", "session":
-		return feishuApprovalReply{choice: choiceApprovedSess, comment: comment}, true
+		return ApprovalReply{Choice: ChoiceApprovedSess, Comment: comment}, true
 	case "a", "always":
-		return feishuApprovalReply{choice: choiceApprovedAlways, comment: comment}, true
+		return ApprovalReply{Choice: ChoiceApprovedAlways, Comment: comment}, true
 	case "n", "no":
-		return feishuApprovalReply{choice: choiceDenied, comment: comment}, true
+		return ApprovalReply{Choice: ChoiceDenied, Comment: comment}, true
 	}
 	if strings.Contains(s, ",") || isAllASCIIDigits(s) {
 		indices, err := parseApprovalIndices(s, total)
 		if err != nil {
-			return feishuApprovalReply{choice: choiceDenied, comment: comment}, true
+			return ApprovalReply{Choice: ChoiceDenied, Comment: comment}, true
 		}
-		return feishuApprovalReply{choice: choiceApprovedOnce, indices: indices, comment: comment}, true
+		return ApprovalReply{Choice: ChoiceApprovedOnce, Indices: indices, Comment: comment}, true
 	}
-	return feishuApprovalReply{choice: choiceDenied, comment: comment}, true
+	return ApprovalReply{Choice: ChoiceDenied, Comment: comment}, true
 }
 
 func isAllASCIIDigits(s string) bool {
@@ -151,7 +145,7 @@ func isAllASCIIDigits(s string) bool {
 	return true
 }
 
-// parseApprovalIndices parses "1,3,5" into 0-based indices (CLI semantics).
+// parseApprovalIndices parses "1,3,5" into 0-based indices.
 func parseApprovalIndices(input string, total int) ([]int32, error) {
 	parts := strings.Split(input, ",")
 	var indices []int32
@@ -170,61 +164,55 @@ func parseApprovalIndices(input string, total int) ([]int32, error) {
 }
 
 // TryResolveP2P returns true if the message was consumed as an approval reply.
-func (a *FeishuApprover) TryResolveP2P(chatID, content string) bool {
-	a.mu.Lock()
-	entry := a.wait[chatID]
-	a.mu.Unlock()
+func (a *Approver) TryResolveP2P(chatID, content string) bool {
+	a.Mu.Lock()
+	entry := a.Wait[chatID]
+	a.Mu.Unlock()
 	if entry == nil {
 		return false
 	}
 
-	var reply feishuApprovalReply
-	if entry.batchN == 0 {
-		c, comment, ok := parseApprovalChoice(content)
+	var reply ApprovalReply
+	if entry.BatchN == 0 {
+		c, comment, ok := ParseApprovalChoice(content)
 		if !ok {
 			return false
 		}
-		reply = feishuApprovalReply{choice: c, comment: comment}
+		reply = ApprovalReply{Choice: c, Comment: comment}
 	} else {
 		var ok bool
-		reply, ok = parseBatchApprovalChoice(content, entry.batchN)
+		reply, ok = ParseBatchApprovalChoice(content, entry.BatchN)
 		if !ok {
 			return false
 		}
 	}
 	select {
-	case entry.ch <- reply:
+	case entry.Ch <- reply:
 	default:
 	}
 	return true
 }
 
-// waitApproval blocks until the user replies, times out, or context ends.
-// batchN 0 = single (y/s/a/n only); batchN > 0 = batch (CLI-style yes/no + 1,3,5).
-func (a *FeishuApprover) waitApproval(chatID, prompt string, batchN int) feishuApprovalReply {
-	timeout := a.plugin.cfg.approvalTimeout()
-	ch := make(chan feishuApprovalReply, 1)
+// WaitApproval blocks until the user replies, times out, or context ends.
+func (a *Approver) WaitApproval(chatID, prompt string, batchN int, timeout time.Duration, sendFn func(string) error) ApprovalReply {
+	ch := make(chan ApprovalReply, 1)
 
-	a.mu.Lock()
-	if _, busy := a.wait[chatID]; busy {
-		a.mu.Unlock()
-		return feishuApprovalReply{choice: choiceDenied}
+	a.Mu.Lock()
+	if _, busy := a.Wait[chatID]; busy {
+		a.Mu.Unlock()
+		return ApprovalReply{Choice: ChoiceDenied}
 	}
-	a.wait[chatID] = &approvalWait{ch: ch, batchN: batchN}
-	a.mu.Unlock()
+	a.Wait[chatID] = &ApprovalWait{Ch: ch, BatchN: batchN}
+	a.Mu.Unlock()
 
 	defer func() {
-		a.mu.Lock()
-		delete(a.wait, chatID)
-		a.mu.Unlock()
+		a.Mu.Lock()
+		delete(a.Wait, chatID)
+		a.Mu.Unlock()
 	}()
 
-	ctx := a.plugin.runCtx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := a.bot.sendApprovalMessageToChat(ctx, chatID, prompt); err != nil {
-		return feishuApprovalReply{choice: choiceDenied}
+	if err := sendFn(prompt); err != nil {
+		return ApprovalReply{Choice: ChoiceDenied}
 	}
 
 	timer := time.NewTimer(timeout)
@@ -233,21 +221,19 @@ func (a *FeishuApprover) waitApproval(chatID, prompt string, batchN int) feishuA
 	case v := <-ch:
 		return v
 	case <-timer.C:
-		return feishuApprovalReply{choice: choiceDenied}
-	case <-ctx.Done():
-		return feishuApprovalReply{choice: choiceDenied}
+		return ApprovalReply{Choice: ChoiceDenied}
 	}
 }
 
-// formatApprovalArgsMarkdown formats ArgsJSON for display; tool-specific layout matches cli_approver.
-func formatApprovalArgsMarkdown(tool, argsJSON string, contentMaxRunes int) string {
+// FormatApprovalArgsMarkdown formats ArgsJSON for display.
+func FormatApprovalArgsMarkdown(tool, argsJSON string, contentMaxRunes int) string {
 	raw := strings.TrimSpace(argsJSON)
 	if raw == "" {
 		raw = "{}"
 	}
 	var args map[string]any
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
-		fallback := truncateRunes(raw, maxApprovalRestJSONRunes)
+		fallback := truncateStringByRunes(raw, maxApprovalRestJSONRunes)
 		return "### Arguments\n\n```json\n" + fallback + "\n```\n"
 	}
 
@@ -267,7 +253,7 @@ func formatShellArgsMarkdown(args map[string]any, cmdMaxRunes, restJSONMaxRunes 
 
 	var b strings.Builder
 	b.WriteString("### Command\n\n```\n")
-	b.WriteString(truncateRunes(cmd, cmdMaxRunes))
+	b.WriteString(truncateStringByRunes(cmd, cmdMaxRunes))
 	b.WriteString("\n```\n")
 	if len(args) > 0 {
 		b.WriteString("\n")
@@ -288,7 +274,7 @@ func formatFsArgsMarkdown(args map[string]any, contentMaxRunes, restJSONMaxRunes
 	}
 	if c, ok := args["content"].(string); ok && c != "" {
 		b.WriteString("### File content\n\n")
-		b.WriteString(truncateRunes(c, contentMaxRunes))
+		b.WriteString(truncateStringByRunes(c, contentMaxRunes))
 		b.WriteString("\n\n")
 		delete(args, "content")
 	}
@@ -304,7 +290,7 @@ func formatGenericArgsMarkdown(args map[string]any, contentMaxRunes, restJSONMax
 	var b strings.Builder
 	if c, ok := args["content"].(string); ok && c != "" {
 		b.WriteString("### File content\n\n")
-		b.WriteString(truncateRunes(c, contentMaxRunes))
+		b.WriteString(truncateStringByRunes(c, contentMaxRunes))
 		b.WriteString("\n\n")
 		delete(args, "content")
 	}
@@ -322,22 +308,27 @@ func formatRemainingJSONMarkdown(args map[string]any, restJSONMaxRunes int) stri
 	}
 	rs := string(rest)
 	if utf8.RuneCountInString(rs) > restJSONMaxRunes {
-		rs = truncateRunes(rs, restJSONMaxRunes)
+		rs = truncateStringByRunes(rs, restJSONMaxRunes)
 	}
 	return "### Other arguments\n\n```json\n" + rs + "\n```\n"
 }
 
-func (a *FeishuApprover) handleSingle(req *proto.ApprovalRequest, resp *proto.ApprovalResult) {
-	tape := strings.TrimSpace(req.Tape)
-	log.Printf("feishu: approver single tape=%q tool=%q", tape, req.Tool)
-	chatID, ok := p2pChatIDFromTape(tape)
-	log.Printf("feishu: approver single p2p_parse ok=%v chatID=%q", ok, chatID)
-	if !ok {
-		resp.Choice = choiceDenied
-		resp.Comment = "unknown tape routing for approval"
-		return
+func truncateStringByRunes(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
 	}
+	if utf8.RuneCountInString(s) <= maxRunes {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes])
+	}
+	return s
+}
 
+// HandleSingle handles single approval request.
+func (a *Approver) HandleSingle(req *proto.ApprovalRequest, resp *proto.ApprovalResult, chatID string, sendFn func(string) error, timeout time.Duration) {
 	argsStr := strings.TrimSpace(req.ArgsJSON)
 	if argsStr == "" {
 		argsStr = "{}"
@@ -355,7 +346,7 @@ func (a *FeishuApprover) handleSingle(req *proto.ApprovalRequest, resp *proto.Ap
 		b.WriteString(fmt.Sprintf("- **Reason:** %s\n", reason))
 	}
 	b.WriteString("\n")
-	b.WriteString(formatApprovalArgsMarkdown(req.Tool, argsStr, maxApprovalContentRunesSingle))
+	b.WriteString(FormatApprovalArgsMarkdown(req.Tool, argsStr, maxApprovalContentRunesSingle))
 	b.WriteString("\n### Reply\n\n")
 	b.WriteString("Reply with one letter:\n\n")
 	b.WriteString("- **y** — approve once\n")
@@ -368,31 +359,18 @@ func (a *FeishuApprover) handleSingle(req *proto.ApprovalRequest, resp *proto.Ap
 	b.WriteString("- Example: `y // looks safe`\n")
 
 	body := b.String()
-	reply := a.waitApproval(chatID, body, 0)
-	resp.Choice = reply.choice
-	resp.Comment = reply.comment
-	if resp.Choice == choiceDenied && resp.Comment == "" {
+	reply := a.WaitApproval(chatID, body, 0, timeout, sendFn)
+	resp.Choice = reply.Choice
+	resp.Comment = reply.Comment
+	if resp.Choice == ChoiceDenied && resp.Comment == "" {
 		resp.Comment = "denied or timeout"
 	}
 }
 
-func (a *FeishuApprover) handleBatch(req *proto.BatchApprovalRequest, resp *proto.BatchApprovalResult) {
+// HandleBatch handles batch approval request.
+func (a *Approver) HandleBatch(req *proto.BatchApprovalRequest, resp *proto.BatchApprovalResult, chatID string, sendFn func(string) error, timeout time.Duration) {
 	if len(req.Requests) == 0 {
-		resp.Choice = choiceDenied
-		return
-	}
-	tape := strings.TrimSpace(req.Requests[0].Tape)
-	log.Printf("feishu: approver batch tape=%q reqCount=%d", tape, len(req.Requests))
-	for _, r := range req.Requests {
-		if strings.TrimSpace(r.Tape) != tape {
-			resp.Choice = choiceDenied
-			return
-		}
-	}
-	chatID, ok := p2pChatIDFromTape(tape)
-	log.Printf("feishu: approver batch p2p_parse ok=%v chatID=%q", ok, chatID)
-	if !ok {
-		resp.Choice = choiceDenied
+		resp.Choice = ChoiceDenied
 		return
 	}
 
@@ -403,7 +381,7 @@ func (a *FeishuApprover) handleBatch(req *proto.BatchApprovalRequest, resp *prot
 
 	var b strings.Builder
 	b.WriteString("## DMR batch approval\n\n")
-	fmt.Fprintf(&b, "**Approval required** — **%d** command(s) (same layout as CLI approver).\n\n", n)
+	fmt.Fprintf(&b, "**Approval required** — **%d** command(s).\n\n", n)
 	if reason != "" {
 		b.WriteString(fmt.Sprintf("**Reason:** %s\n\n", reason))
 	}
@@ -434,17 +412,17 @@ func (a *FeishuApprover) handleBatch(req *proto.BatchApprovalRequest, resp *prot
 	b.WriteString("- Example: `n // security concern`\n")
 	b.WriteString("- Example: `1,3 // approved, others look risky`\n")
 
-	reply := a.waitApproval(chatID, b.String(), n)
-	resp.Choice = reply.choice
-	resp.Comment = reply.comment
-	if reply.indices != nil {
-		resp.Approved = reply.indices
+	reply := a.WaitApproval(chatID, b.String(), n, timeout, sendFn)
+	resp.Choice = reply.Choice
+	resp.Comment = reply.Comment
+	if reply.Indices != nil {
+		resp.Approved = reply.Indices
 	} else {
 		resp.Approved = nil
 	}
 }
 
-// formatBatchCommandLine renders one numbered line like cliapprover renderToolInfoInline + detail block.
+// formatBatchCommandLine renders one numbered line.
 func formatBatchCommandLine(index int, tool, argsJSON string, contentMaxRunes int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "**%d.** ", index)
@@ -455,7 +433,7 @@ func formatBatchCommandLine(index int, tool, argsJSON string, contentMaxRunes in
 	var args map[string]any
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
 		fmt.Fprintf(&b, "`%s` — *(invalid args JSON)*\n\n", tool)
-		fallback := truncateRunes(raw, 400)
+		fallback := truncateStringByRunes(raw, 400)
 		b.WriteString("```json\n" + fallback + "\n```")
 		return b.String()
 	}
@@ -464,14 +442,14 @@ func formatBatchCommandLine(index int, tool, argsJSON string, contentMaxRunes in
 		cmd, _ := args["cmd"].(string)
 		fmt.Fprintf(&b, "`%s`\n\n", tool)
 		b.WriteString("```\n")
-		b.WriteString(truncateRunes(cmd, contentMaxRunes))
+		b.WriteString(truncateStringByRunes(cmd, contentMaxRunes))
 		b.WriteString("\n```")
 	case "fsWrite", "fsEdit":
 		path, _ := args["path"].(string)
 		fmt.Fprintf(&b, "`%s` — path: `%s`", tool, path)
 		if c, ok := args["content"].(string); ok && c != "" {
 			b.WriteString("\n\n```\n")
-			b.WriteString(truncateRunes(c, contentMaxRunes))
+			b.WriteString(truncateStringByRunes(c, contentMaxRunes))
 			b.WriteString("\n```")
 		}
 	default:

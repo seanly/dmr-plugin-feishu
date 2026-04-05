@@ -30,51 +30,54 @@ Cross-compile: `make cross-build`.
 2. Register it as an **external** plugin with `path` pointing to the executable.
 3. Use this plugin as the **approver** (it implements `ProvideApprover` via RPC). Disable **`cli_approver`** (or another approver) so only one approver is active.
 
-Example snippet (`~/.dmr/config.yaml`):
+Example snippet (`~/.dmr/config.toml`):
 
-```yaml
-plugins:
-  - name: opa_policy
-    enabled: true
+```toml
+[[plugins]]
+name = "opa_policy"
+enabled = true
 
-  - name: cli_approver
-    enabled: false
+[[plugins]]
+name = "cli_approver"
+enabled = false
 
-  - name: feishu
-    enabled: true
-    path: ~/.dmr/plugins/dmr-plugin-feishu   # or absolute path to the binary
-    config:
-      app_id: "cli_xxx"
-      app_secret: "xxx"
-      verification_token: "xxx"
-      encrypt_key: ""                         # optional, if encryption enabled on the app
-      allow_from: []                        # empty = all senders; else allowlist of user ids
-      approval_timeout_sec: 300
-      dedup_ttl_minutes: 10
-      # optional — feishuSendFile
-      # send_file_max_bytes: 31457280   # default 30 MiB
-      # send_file_root: "/safe/read-only/dir"  # if set, path args must stay under this dir
-      # optional — inbound image/file (p2p): download to DMR workspace (requires Feishu message-resource scopes; default on)
-      # inbound_media_enabled: false
-      # inbound_media_max_bytes: 31457280
-      # inbound_media_dir: feishu-inbound
-      # inbound_media_timeout_sec: 45
-      # inbound_media_retention_days: 7   # 0 = no auto cleanup of date subfolders
-      # optional — quote/reply parent message context for RunAgent (im/v1 message/get)
-      # inbound_reply_context_enabled: true    # default true; set false to skip
-      # inbound_reply_context_timeout_sec: 12
-      # inbound_reply_context_max_runes: 8000
-      # optional — Feishu-only instructions prepended to inbound RunAgent user message (see below)
-      # extra_prompt: |
-      #   When using cron reminders on this tape, always call feishuSendText with tape_name.
-      # extra_prompt_file: prompts/feishu_extra.md   # relative to ~/.dmr/ (config file directory)
-      # optional — restart DMR from Feishu (same as `dmr serve service restart` on the host)
-      # allow_from: ["ou_xxx"]                       # required when using dmr_restart_token
-      # dmr_restart_trigger: ",dmr-restart"          # default; first line of message must start with this
-      # dmr_restart_token: "long-random-secret"      # message: ",dmr-restart long-random-secret"
+[[plugins]]
+name = "feishu"
+enabled = true
+path = "~/.dmr/plugins/dmr-plugin-feishu"   # or absolute path to the binary
+[plugins.config]
+app_id = "cli_xxx"
+app_secret = "xxx"
+verification_token = "xxx"
+encrypt_key = ""                         # optional, if encryption enabled on the app
+allow_from = []                          # empty = all senders; else allowlist of user ids
+approval_timeout_sec = 300
+dedup_ttl_minutes = 10
+# optional — feishuSendFile
+# send_file_max_bytes = 31457280         # default 30 MiB
+# send_file_root = "/safe/read-only/dir" # if set, path args must stay under this dir
+# optional — inbound image/file (p2p): download to DMR workspace (requires Feishu message-resource scopes; default on)
+# inbound_media_enabled = false
+# inbound_media_max_bytes = 31457280
+# inbound_media_dir = "feishu-inbound"
+# inbound_media_timeout_sec = 45
+# inbound_media_retention_days = 7       # 0 = no auto cleanup of date subfolders
+# optional — quote/reply parent message context for RunAgent (im/v1 message/get)
+# inbound_reply_context_enabled = true   # default true; set false to skip
+# inbound_reply_context_timeout_sec = 12
+# inbound_reply_context_max_runes = 8000
+# optional — Feishu-only instructions prepended to inbound RunAgent user message (see below)
+# extra_prompt = """
+# When using cron reminders on this tape, always call feishuSendText with tape_name.
+# """
+# extra_prompt_file = "prompts/feishu_extra.md"   # relative to ~/.dmr/ (config file directory)
+# optional — restart DMR from Feishu (same as `dmr serve service restart` on the host)
+# allow_from = ["ou_xxx"]                       # required when using dmr_restart_token
+# dmr_restart_trigger = ",dmr-restart"          # default; first line of message must start with this
+# dmr_restart_token = "long-random-secret"      # message: ",dmr-restart long-random-secret"
 ```
 
-Plugin `config` is passed through DMR as JSON; field names match the struct tags below. Legacy keys such as `group_trigger` in YAML are ignored if present in the JSON subset DMR sends.
+Plugin `config` is passed through DMR as JSON; field names match the struct tags below. Legacy keys such as `group_trigger` in TOML are ignored if present in the JSON subset DMR sends.
 
 ## Plugin config fields
 
@@ -99,7 +102,7 @@ Plugin `config` is passed through DMR as JSON; field names match the struct tags
 | `inbound_reply_context_timeout_sec` | Timeout for each parent **`message.get`** (default **`12`**). |
 | `inbound_reply_context_max_runes` | Max runes of the **parent** body inside the quoted block after parsing (default **`8000`**); longer bodies get `...(truncated)`. |
 | `extra_prompt` | Optional multiline text. Combined with `extra_prompt_file` and **prefixed** to each **Feishu inbound** `RunAgent` prompt (before the real user message, separated by `---`). Not an extra LLM API `system` message — DMR still uses global `agent.system_prompt` for the system role. |
-| `extra_prompt_file` | Optional path to a UTF-8 file. **Relative paths** are resolved against DMR’s injected **`config_base_dir`** (the directory containing your main `config.yaml`). Loaded at plugin **Init**; content is placed **before** `extra_prompt` when both are set. |
+| `extra_prompt_file` | Optional path to a UTF-8 file. **Relative paths** are resolved against DMR’s injected **`config_base_dir`** (the directory containing your main `config.toml`). Loaded at plugin **Init**; content is placed **before** `extra_prompt` when both are set. |
 | `dmr_restart_trigger` | Prefix for the admin restart line (default `,dmr-restart`). Only the **first line** of the message is checked. |
 | `dmr_restart_token` | If non-empty, enables restart: send a p2p message whose first line is `<dmr_restart_trigger> <token>` to trigger **`dmr serve service restart`** on the DMR host. **Requires non-empty `allow_from`.** High risk — use a long random token. |
 

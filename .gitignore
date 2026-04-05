@@ -6,6 +6,13 @@ dmr-plugin-feishu-linux-amd64
 dmr-plugin-feishu-linux-arm64
 dmr-plugin-feishu-darwin-amd64
 dmr-plugin-feishu-darwin-arm64
+dmr-plugin-feishu-windows-amd64.exe
+dmr-plugin-feishu-windows-arm64.exe
+
+# Build output directory
+/bin/
+/dist/
+/build/
 
 # Go
 *.exe
