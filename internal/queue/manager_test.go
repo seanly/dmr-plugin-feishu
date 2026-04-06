@@ -10,16 +10,13 @@ import (
 
 // MockHandler implements Handler interface for testing
 type MockHandler struct {
-	activeJobs    map[string]*Job
 	processCalled int
 	replyOutput   string
 	replyError    error
 }
 
 func NewMockHandler() *MockHandler {
-	return &MockHandler{
-		activeJobs: make(map[string]*Job),
-	}
+	return &MockHandler{}
 }
 
 func (m *MockHandler) ProcessJob(job *Job) {
@@ -27,31 +24,15 @@ func (m *MockHandler) ProcessJob(job *Job) {
 	ProcessJob(context.Background(), m, job)
 }
 
-func (m *MockHandler) GetActiveJobByTape(tapeName string) *Job {
-	return m.activeJobs[tapeName]
-}
-
-func (m *MockHandler) SetActiveJob(job *Job) {
-	m.activeJobs[job.TapeName] = job
-}
-
-func (m *MockHandler) ClearActiveJob(tapeName string, jobID string) {
-	if job, ok := m.activeJobs[tapeName]; ok {
-		if jobID == "" || job.ID == jobID {
-			delete(m.activeJobs, tapeName)
-		}
-	}
-}
-
 func (m *MockHandler) ComposeRunPrompt(userContent string) string {
 	return userContent
 }
 
-func (m *MockHandler) CallRunAgent(tape, prompt string, historyAfter int64) (*proto.RunAgentResponse, error) {
+func (m *MockHandler) CallRunAgentWithContext(tape, prompt string, historyAfter int64, ctx map[string]any) (*proto.RunAgentResponse, error) {
 	return &proto.RunAgentResponse{Output: m.replyOutput}, nil
 }
 
-func (m *MockHandler) ReplyAgentOutput(ctx context.Context, job *Job, output string) error {
+func (m *MockHandler) ReplyAgentOutputWithContext(ctx context.Context, chatID, triggerMessageID string, inThread bool, output string) error {
 	return m.replyError
 }
 
@@ -195,53 +176,28 @@ func TestProcessJobWithNilJob(t *testing.T) {
 	}
 }
 
-func TestClearActiveJobWithJobID(t *testing.T) {
+func TestJobContextPassedToRunAgent(t *testing.T) {
 	handler := NewMockHandler()
-
-	job1 := &Job{
-		ID:       "job-1",
-		TapeName: "feishu:p2p:oc_xxx",
-	}
-	job2 := &Job{
-		ID:       "job-2",
-		TapeName: "feishu:p2p:oc_xxx",
-	}
-
-	// Set first job
-	handler.SetActiveJob(job1)
-
-	// Try to clear with wrong ID (simulating delayed cleanup of old job)
-	handler.ClearActiveJob(job1.TapeName, "wrong-id")
-
-	// Job should still be there
-	if handler.GetActiveJobByTape(job1.TapeName) == nil {
-		t.Error("Job should not be cleared with wrong ID")
-	}
-
-	// Set second job (overwrites first)
-	handler.SetActiveJob(job2)
-
-	// Clear with correct ID
-	handler.ClearActiveJob(job2.TapeName, job2.ID)
-
-	// Job should be cleared
-	if handler.GetActiveJobByTape(job2.TapeName) != nil {
-		t.Error("Job should be cleared with correct ID")
-	}
-}
-
-func TestClearActiveJobWithoutJobID(t *testing.T) {
-	handler := NewMockHandler()
+	qm := NewManager(handler)
 
 	job := &Job{
-		ID:       "job-1",
-		TapeName: "feishu:p2p:oc_xxx",
+		ID:               "test-job-123",
+		TapeName:         "feishu:p2p:oc_xxx",
+		ChatID:           "oc_xxx",
+		TriggerMessageID: "om_yyy",
+		InThread:         true,
+		Content:          "Hello",
 	}
 
-	handler.SetActiveJob(job)
-	handler.ClearActiveJob(job.TapeName, "") // Empty ID clears unconditionally
+	qm.Enqueue(job)
 
-	if handler.GetActiveJobByTape(job.TapeName) != nil {
-		t.Error("Job should be cleared with empty ID")
+	// Wait for processing
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify job was processed
+	if handler.processCalled != 1 {
+		t.Errorf("ProcessJob called %d times, want 1", handler.processCalled)
 	}
+
+	qm.ShutdownAll()
 }

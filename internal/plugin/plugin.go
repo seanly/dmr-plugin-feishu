@@ -58,10 +58,6 @@ type Plugin struct {
 	dedup  *inbound.Deduper
 	queues *queue.Manager
 
-	// Active jobs tracking
-	activeJobsMu sync.RWMutex
-	activeJobs   map[string]*queue.Job
-
 	// Extra prompt
 	extraRunPrompt string
 	promptComposer *prompt.Composer
@@ -70,9 +66,8 @@ type Plugin struct {
 // New creates a new Feishu plugin.
 func New() *Plugin {
 	p := &Plugin{
-		cfg:        DefaultConfig(),
-		routing:    make(map[string]*bot.Instance),
-		activeJobs: make(map[string]*queue.Job),
+		cfg:     DefaultConfig(),
+		routing: make(map[string]*bot.Instance),
 	}
 	p.queues = queue.NewManager(p)
 	return p
@@ -145,15 +140,16 @@ func (p *Plugin) Init(req *proto.InitRequest, resp *proto.InitResponse) error {
 		}
 		inst.Approver = bot.NewApprover(p)
 
-		// Auto-fetch bot_id at startup
+		// Auto-fetch bot_id at startup (for group @mention detection)
 		fetchCtx, fetchCancel := context.WithTimeout(ctx, 15*time.Second)
 		fetchedID, err := inst.Client.GetBotID(fetchCtx)
 		fetchCancel()
 		if err != nil {
-			log.Printf("feishu: bot #%d failed to auto-fetch bot_open_id: %v", i, err)
+			log.Printf("feishu: bot #%d bot_open_id=NOT_AVAILABLE (auto-fetch failed: %v)", i, err)
+			log.Printf("feishu: bot #%d NOTE: Group chat @mention detection will not work without bot_open_id", i)
 		} else {
 			inst.BotID = fetchedID
-			log.Printf("feishu: bot #%d bot_open_id=%s (auto-fetched)", i, inst.BotID)
+			log.Printf("feishu: bot #%d bot_open_id=%s (auto-fetched, group @mention enabled)", i, inst.BotID)
 		}
 
 		// Each bot's message handler
@@ -342,11 +338,15 @@ func (p *Plugin) ProvideTools(req *proto.ProvideToolsRequest, resp *proto.Provid
 			Name:           "feishuSendFile",
 			Description:    "Upload a local file and send it as a file message in the current p2p chat.",
 			ParametersJSON: tools.SendFileParams(),
+			Group:          "extended",
+			SearchHint:     "feishu, send, file, upload, attachment, document, 飞书, 发送文件, 上传",
 		},
 		{
 			Name:           "feishuSendText",
 			Description:    "Send a short non-report text to the current Feishu p2p chat.",
 			ParametersJSON: tools.SendTextParams(),
+			Group:          "extended",
+			SearchHint:     "feishu, send, message, text, chat, im, 飞书, 发送消息, 文本",
 		},
 	}
 	names := []string{"feishuSendFile", "feishuSendText"}
@@ -358,17 +358,30 @@ func (p *Plugin) ProvideTools(req *proto.ProvideToolsRequest, resp *proto.Provid
 func (p *Plugin) CallTool(req *proto.CallToolRequest, resp *proto.CallToolResponse) error {
 	ctx := p.getRunCtx()
 
-	// Look up the active job
-	job := p.GetActiveJobByTape(req.SessionTape)
-	if job == nil {
-		log.Printf("feishu: CallTool %s with no active job for session tape %q", req.Name, req.SessionTape)
+	// Parse context from the request (passed from RunAgent)
+	toolCtx := make(map[string]any)
+	if req.ContextJSON != "" {
+		if err := json.Unmarshal([]byte(req.ContextJSON), &toolCtx); err != nil {
+			log.Printf("feishu: CallTool %s failed to parse context JSON: %v", req.Name, err)
+		}
+	}
+
+	// Extract chat_id from context or session tape
+	chatID, _ := toolCtx["chat_id"].(string)
+	if chatID == "" {
+		// Fallback: try to extract from session tape (e.g., "feishu:p2p:oc_xxx")
+		chatID, _ = inbound.P2PChatIDFromTape(req.SessionTape)
+	}
+
+	if chatID != "" {
+		log.Printf("feishu: CallTool %s chat_id=%q", req.Name, chatID)
 	} else {
-		log.Printf("feishu: CallTool %s with active job tape=%q chat_id=%q", req.Name, job.TapeName, job.ChatID)
+		log.Printf("feishu: CallTool %s (no chat_id in context or tape %q)", req.Name, req.SessionTape)
 	}
 
 	switch req.Name {
 	case "feishuSendFile":
-		result, err := p.execSendFile(ctx, req.ArgsJSON, job)
+		result, err := p.execSendFile(ctx, req.ArgsJSON, toolCtx)
 		if err != nil {
 			log.Printf("feishu: feishuSendFile failed: %v", err)
 			resp.Error = err.Error()
@@ -378,7 +391,7 @@ func (p *Plugin) CallTool(req *proto.CallToolRequest, resp *proto.CallToolRespon
 		resp.ResultJSON = string(b)
 		return nil
 	case "feishuSendText":
-		result, err := p.execSendText(ctx, req.ArgsJSON, job)
+		result, err := p.execSendText(ctx, req.ArgsJSON, toolCtx)
 		if err != nil {
 			log.Printf("feishu: feishuSendText failed: %v", err)
 			resp.Error = err.Error()
@@ -394,44 +407,46 @@ func (p *Plugin) CallTool(req *proto.CallToolRequest, resp *proto.CallToolRespon
 }
 
 // execSendFile executes feishuSendFile tool.
-func (p *Plugin) execSendFile(ctx context.Context, argsJSON string, job *queue.Job) (map[string]any, error) {
-	var jobChatID string
-	var jobInThread bool
-	var jobTriggerMessageID string
-	var jobBot *bot.Instance
+// Uses context passed from RunAgent instead of maintaining in-memory job state.
+func (p *Plugin) execSendFile(ctx context.Context, argsJSON string, toolCtx map[string]any) (map[string]any, error) {
+	// Extract context values
+	chatID, _ := toolCtx["chat_id"].(string)
+	triggerMessageID, _ := toolCtx["trigger_message_id"].(string)
+	inThread, _ := toolCtx["in_thread"].(bool)
 
-	if job != nil {
-		jobChatID = job.ChatID
-		jobInThread = job.InThread
-		jobTriggerMessageID = job.TriggerMessageID
-		if b, ok := job.Bot.(*bot.Instance); ok {
-			jobBot = b
-		}
+	if chatID == "" {
+		return nil, fmt.Errorf("feishuSendFile: chat_id not found in context")
 	}
 
-	if jobBot == nil || jobBot.Client == nil {
-		return nil, fmt.Errorf("feishuSendFile only works during a Feishu-triggered RunAgent")
+	// Get bot for this chat dynamically
+	botInst, err := p.GetBotForChat(chatID)
+	if err != nil {
+		return nil, fmt.Errorf("feishuSendFile: bot not found for chat %s: %w", chatID, err)
+	}
+	if botInst == nil || botInst.Client == nil {
+		return nil, fmt.Errorf("feishuSendFile: bot client not initialized for chat %s", chatID)
 	}
 
-	return tools.ExecuteSendFile(ctx, argsJSON, jobChatID, jobInThread, jobTriggerMessageID, jobBot.Client, p.cfg.GetSendFileMaxBytes(), p.cfg.SendFileRoot, p.cfg.Workspace)
+	return tools.ExecuteSendFile(ctx, argsJSON, chatID, inThread, triggerMessageID, botInst.Client, p.cfg.GetSendFileMaxBytes(), p.cfg.SendFileRoot, p.cfg.Workspace)
 }
 
 // execSendText executes feishuSendText tool.
-func (p *Plugin) execSendText(ctx context.Context, argsJSON string, job *queue.Job) (map[string]any, error) {
-	var jobChatID string
-	var jobTriggerMessageID string
-	var jobInThread bool
-	var jobBot *bot.Instance
+// Uses context passed from RunAgent instead of maintaining in-memory job state.
+func (p *Plugin) execSendText(ctx context.Context, argsJSON string, toolCtx map[string]any) (map[string]any, error) {
+	// Extract context values (may be empty if not provided)
+	chatID, _ := toolCtx["chat_id"].(string)
+	triggerMessageID, _ := toolCtx["trigger_message_id"].(string)
+	inThread, _ := toolCtx["in_thread"].(bool)
 
-	if job != nil {
-		jobChatID = job.ChatID
-		jobTriggerMessageID = job.TriggerMessageID
-		jobInThread = job.InThread
-		if b, ok := job.Bot.(*bot.Instance); ok {
-			jobBot = b
+	// Get bot for context chat (if available)
+	var contextBot tools.ThreadAwareMessageClient
+	if chatID != "" {
+		if bot, err := p.GetBotForChat(chatID); err == nil && bot != nil {
+			contextBot = bot.Client
 		}
 	}
 
+	// Helper to get bot for any chat ID
 	getBotForChat := func(chatID string) (tools.SimpleMessageClient, error) {
 		bot, err := p.GetBotForChat(chatID)
 		if err != nil {
@@ -443,13 +458,7 @@ func (p *Plugin) execSendText(ctx context.Context, argsJSON string, job *queue.J
 		return bot.Client, nil
 	}
 
-	// Validate jobBot is available when needed
-	var jobBotClient tools.ThreadAwareMessageClient
-	if jobBot != nil {
-		jobBotClient = jobBot.Client
-	}
-
-	return tools.ExecuteSendText(ctx, argsJSON, jobChatID, jobTriggerMessageID, jobInThread, jobBotClient, getBotForChat)
+	return tools.ExecuteSendText(ctx, argsJSON, chatID, triggerMessageID, inThread, contextBot, getBotForChat)
 }
 
 // Helper methods
@@ -519,64 +528,6 @@ func (p *Plugin) GetDeduper() *inbound.Deduper {
 	return p.dedup
 }
 
-// SetActiveJob sets an active job for the given tape.
-func (p *Plugin) SetActiveJob(job *queue.Job) {
-	p.activeJobsMu.Lock()
-	p.activeJobs[job.TapeName] = job
-	p.activeJobsMu.Unlock()
-}
-
-// ClearActiveJob clears the active job for the given tape.
-// If jobID is provided, only clears if the current job matches (prevents race conditions).
-func (p *Plugin) ClearActiveJob(tapeName string, jobID string) {
-	p.activeJobsMu.Lock()
-	defer p.activeJobsMu.Unlock()
-	
-	// If jobID specified, only clear if it matches current job
-	// This prevents delayed cleanup from clearing a newer job
-	if jobID != "" {
-		if current, ok := p.activeJobs[tapeName]; ok && current.ID != jobID {
-			log.Printf("feishu: skip clearing active job (mismatch) tape=%q current=%s requested=%s", 
-				tapeName, current.ID[:8], jobID[:8])
-			return
-		}
-	}
-	
-	delete(p.activeJobs, tapeName)
-}
-
-// GetActiveJobByTape retrieves the active job for a tape.
-// Also handles nested subagent tapes by stripping all :subagent suffixes.
-func (p *Plugin) GetActiveJobByTape(tapeName string) *queue.Job {
-	p.activeJobsMu.RLock()
-	defer p.activeJobsMu.RUnlock()
-	
-	// Direct match
-	if job, ok := p.activeJobs[tapeName]; ok {
-		return job
-	}
-	
-	// Try stripping subagent suffixes recursively
-	parent := inbound.StripDMRSubagentChildTapeSuffix(tapeName)
-	if parent != tapeName {
-		if job, ok := p.activeJobs[parent]; ok {
-			log.Printf("feishu: found job for parent tape %q (from %q)", parent, tapeName)
-			return job
-		}
-	}
-	
-	// Log available jobs for debugging
-	if len(p.activeJobs) > 0 {
-		var available []string
-		for k := range p.activeJobs {
-			available = append(available, k)
-		}
-		log.Printf("feishu: no active job for tape %q (available: %v)", tapeName, available)
-	}
-	
-	return nil
-}
-
 // ComposeRunPrompt composes the run prompt.
 func (p *Plugin) ComposeRunPrompt(userContent string) string {
 	return p.promptComposer.Compose(userContent)
@@ -584,26 +535,42 @@ func (p *Plugin) ComposeRunPrompt(userContent string) string {
 
 // CallRunAgent calls the DMR RunAgent method.
 func (p *Plugin) CallRunAgent(tape, prompt string, historyAfter int64) (*proto.RunAgentResponse, error) {
+	return p.CallRunAgentWithContext(tape, prompt, historyAfter, nil)
+}
+
+// CallRunAgentWithContext calls the DMR RunAgent method with plugin context.
+// The context is passed to tool calls, allowing them to access trigger-time information
+// without maintaining in-memory state.
+func (p *Plugin) CallRunAgentWithContext(tape, prompt string, historyAfter int64, ctx map[string]any) (*proto.RunAgentResponse, error) {
 	p.hostMu.Lock()
 	client := p.hostClient
 	p.hostMu.Unlock()
 	if client == nil {
 		return nil, fmt.Errorf("host client not available")
 	}
-	return client.RunAgent(tape, prompt, historyAfter)
+	return client.RunAgentWithContext(tape, prompt, historyAfter, ctx)
 }
 
 // ReplyAgentOutput sends the agent output back to Feishu.
+// Deprecated: Use ReplyAgentOutputWithContext instead.
 func (p *Plugin) ReplyAgentOutput(ctx context.Context, job *queue.Job, output string) error {
-	text := utils.TruncateRunes(output, 18000)
-	if job == nil || job.Bot == nil {
+	if job == nil {
 		return fmt.Errorf("invalid job")
 	}
-	botInst, ok := job.Bot.(*bot.Instance)
-	if !ok {
-		return fmt.Errorf("invalid bot instance")
+	return p.ReplyAgentOutputWithContext(ctx, job.ChatID, job.TriggerMessageID, job.InThread, output)
+}
+
+// ReplyAgentOutputWithContext sends the agent output back to Feishu using context values.
+func (p *Plugin) ReplyAgentOutputWithContext(ctx context.Context, chatID, triggerMessageID string, inThread bool, output string) error {
+	text := utils.TruncateRunes(output, 18000)
+	if chatID == "" {
+		return fmt.Errorf("invalid chat_id")
 	}
-	return botInst.Client.DeliverIMTextForJob(ctx, job.ChatID, job.TriggerMessageID, job.InThread, text, true)
+	botInst, err := p.GetBotForChat(chatID)
+	if err != nil {
+		return fmt.Errorf("bot not found for chat %s: %w", chatID, err)
+	}
+	return botInst.Client.DeliverIMTextForJob(ctx, chatID, triggerMessageID, inThread, text, true)
 }
 
 // TryResolveApproval tries to resolve a message as an approval reply.

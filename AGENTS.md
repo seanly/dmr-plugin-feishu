@@ -91,19 +91,36 @@ internal/queue/manager.go ──► Enqueue job per chat_id
     ▼
 internal/plugin/plugin.go ──► ProcessJob
     │
-    ├──► SetActiveJob (for tool routing)
+    ├──► Build context (chat_id, message_id, in_thread, etc.)
     │
-    ├──► internal/dmr/client.go ──► Call DMR RunAgent
+    ├──► internal/dmr/client.go ──► Call DMR RunAgentWithContext
     │       │
     │       └──► DMR Host ──► LLM ──► Tool calls
     │               │
     │               └──► internal/plugin/CallTool (feishuSendFile/Text)
+    │                       │
+    │                       └──► Extract context from CallToolRequest.ContextJSON
     │
-    └──► ReplyAgentOutput ──► internal/bot/message.go
+    └──► ReplyAgentOutputWithContext ──► internal/bot/message.go
                 │
                 ▼
             Feishu IM
 ```
+
+### Context Passing (No Active Job State)
+
+Unlike earlier versions that maintained an "active job" map with timeout-based cleanup, this plugin now uses **context passing**:
+
+1. When `ProcessJob` runs, it builds a context map with `chat_id`, `trigger_message_id`, `in_thread`, etc.
+2. This context is passed to `RunAgentWithContext`, which forwards it to the DMR host
+3. When tools (`feishuSendFile`, `feishuSendText`) are called, they receive this context via `CallToolRequest.ContextJSON`
+4. Tools extract `chat_id` from the context and use `GetBotForChat()` to get the bot instance dynamically
+
+**Benefits:**
+- No timeout issues (tools work regardless of how long the agent loop takes)
+- Multi-instance safe (context travels with RPC calls)
+- Simpler code (no SetActiveJob/ClearActiveJob/GetActiveJobByTape logic)
+- Stateless design
 
 ## Approval Flow
 

@@ -12,9 +12,7 @@ import (
 	"github.com/seanly/dmr/pkg/plugin/proto"
 )
 
-// jobCleanupDelay is the delay before clearing active job after RunAgent completes.
-// This allows async/subagent tool calls to complete.
-const jobCleanupDelay = 30 * time.Second
+
 
 // Job is one user message to process serially per chat_id.
 type Job struct {
@@ -34,12 +32,11 @@ type Job struct {
 // Handler is the callback to process a job.
 type Handler interface {
 	ProcessJob(job *Job)
-	GetActiveJobByTape(tapeName string) *Job
-	SetActiveJob(job *Job)
-	ClearActiveJob(tapeName string, jobID string) // jobID for conditional cleanup
 	ComposeRunPrompt(userContent string) string
-	CallRunAgent(tape, prompt string, historyAfter int64) (*proto.RunAgentResponse, error)
-	ReplyAgentOutput(ctx context.Context, job *Job, output string) error
+	// CallRunAgentWithContext calls RunAgent with plugin context.
+	// The context map is passed to tool calls, allowing them to access trigger-time information.
+	CallRunAgentWithContext(tape, prompt string, historyAfter int64, ctx map[string]any) (*proto.RunAgentResponse, error)
+	ReplyAgentOutputWithContext(ctx context.Context, chatID, triggerMessageID string, inThread bool, output string) error
 }
 
 // Manager manages per-chat job queues.
@@ -146,6 +143,7 @@ func (qm *Manager) ShutdownAll() {
 }
 
 // ProcessJob wraps the handler's process job with standard logic.
+// Uses context passing instead of maintaining in-memory active job state.
 func ProcessJob(ctx context.Context, handler Handler, job *Job) {
 	if job == nil {
 		return
@@ -158,15 +156,6 @@ func ProcessJob(ctx context.Context, handler Handler, job *Job) {
 	
 	log.Printf("feishu: processJob tape=%q job=%s", job.TapeName, job.ID[:8])
 
-	handler.SetActiveJob(job)
-	
-	// Delay cleanup to allow async/subagent tool calls to complete
-	// Use time.AfterFunc to avoid goroutine leak
-	time.AfterFunc(jobCleanupDelay, func() {
-		handler.ClearActiveJob(job.TapeName, job.ID)
-		log.Printf("feishu: cleared active job after delay tape=%q job=%s", job.TapeName, job.ID[:8])
-	})
-
 	// Comma commands (command plugin InterceptInput) require the prompt to start with "," after trim.
 	userTrim := strings.TrimSpace(job.Content)
 	runPrompt := handler.ComposeRunPrompt(job.Content)
@@ -176,26 +165,38 @@ func ProcessJob(ctx context.Context, handler Handler, job *Job) {
 		}
 		runPrompt = userTrim
 	}
-	resp, err := handler.CallRunAgent(job.TapeName, runPrompt, 0)
+	
+	// Build context to pass to RunAgent - this replaces the active job mechanism
+	// Tools will receive this context and can extract chat_id, message_id, etc.
+	jobCtx := map[string]any{
+		"chat_id":             job.ChatID,
+		"trigger_message_id":  job.TriggerMessageID,
+		"in_thread":           job.InThread,
+		"sender_id":           job.SenderID,
+		"chat_type":           job.ChatType,
+		"thread_key":          job.ThreadKey,
+	}
+	
+	// Call RunAgent with context - no need for active job management
+	resp, err := handler.CallRunAgentWithContext(job.TapeName, runPrompt, 0, jobCtx)
 	if err != nil {
 		log.Printf("feishu: RunAgent RPC error: %v", err)
-		_ = handler.ReplyAgentOutput(ctx, job, "DMR: RunAgent failed: "+err.Error())
+		_ = handler.ReplyAgentOutputWithContext(ctx, job.ChatID, job.TriggerMessageID, job.InThread, "DMR: RunAgent failed: "+err.Error())
 		return
 	}
 	if resp == nil {
 		return
 	}
 	if resp.Error != "" {
-		_ = handler.ReplyAgentOutput(ctx, job, "DMR error: "+resp.Error)
+		_ = handler.ReplyAgentOutputWithContext(ctx, job.ChatID, job.TriggerMessageID, job.InThread, "DMR error: "+resp.Error)
 	} else {
 		out := resp.Output
 		if out == "" {
 			out = FallbackWhenNoText(job.TapeName, resp)
 			log.Printf("feishu: RunAgent empty output tape=%q steps=%d toolCalls=%d", job.TapeName, resp.Steps, len(resp.ToolCalls))
 		}
-		_ = handler.ReplyAgentOutput(ctx, job, out)
+		_ = handler.ReplyAgentOutputWithContext(ctx, job.ChatID, job.TriggerMessageID, job.InThread, out)
 	}
-	// Job remains active for jobCleanupDelay after RunAgent returns
 }
 
 // FallbackWhenNoText explains empty agent Output.
