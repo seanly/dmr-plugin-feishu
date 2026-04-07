@@ -407,15 +407,32 @@ func (p *Plugin) CallTool(req *proto.CallToolRequest, resp *proto.CallToolRespon
 }
 
 // execSendFile executes feishuSendFile tool.
-// Uses context passed from RunAgent instead of maintaining in-memory job state.
+// Uses context passed from RunAgent or args (for Cron jobs).
 func (p *Plugin) execSendFile(ctx context.Context, argsJSON string, toolCtx map[string]any) (map[string]any, error) {
-	// Extract context values
+	// Extract context values (may be empty if not provided, e.g., Cron jobs)
 	chatID, _ := toolCtx["chat_id"].(string)
 	triggerMessageID, _ := toolCtx["trigger_message_id"].(string)
 	inThread, _ := toolCtx["in_thread"].(bool)
 
+	// If no chat_id in context, try to get from args (for Cron/scheduled tasks)
 	if chatID == "" {
-		return nil, fmt.Errorf("feishuSendFile: chat_id not found in context")
+		var args map[string]any
+		if err := json.Unmarshal([]byte(argsJSON), &args); err == nil {
+			// Try tape_name first
+			if tapeName, ok := args["tape_name"].(string); ok && tapeName != "" {
+				chatID = tools.ExtractChatIDFromTape(tapeName)
+			}
+			// Fallback to chat_id in args
+			if chatID == "" {
+				if id, ok := args["chat_id"].(string); ok && id != "" {
+					chatID = id
+				}
+			}
+		}
+	}
+
+	if chatID == "" {
+		return nil, fmt.Errorf("feishuSendFile: chat_id not found in context or args (tape_name/chat_id)")
 	}
 
 	// Get bot for this chat dynamically
