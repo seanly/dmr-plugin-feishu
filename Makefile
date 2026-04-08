@@ -1,7 +1,8 @@
-.PHONY: build install clean tidy cross-build test
+.PHONY: build install install-policy clean tidy cross-build test
 
 BINARY := dmr-plugin-feishu
 INSTALL_DIR := $(HOME)/.dmr/plugins
+POLICY_DIR := $(HOME)/.dmr/etc/policies
 
 build: tidy
 	go build -o $(BINARY) ./cmd/dmr-plugin-feishu/
@@ -24,6 +25,10 @@ install: build
 	mkdir -p $(INSTALL_DIR)
 	cp $(BINARY) $(INSTALL_DIR)/
 	@echo "Installed to $(INSTALL_DIR)/$(BINARY)"
+
+install-policy:
+	mkdir -p $(POLICY_DIR)
+	cp policies/feishu.rego $(POLICY_DIR)/
 
 clean:
 	rm -f $(BINARY) $(BINARY)-linux-amd64 $(BINARY)-linux-arm64 $(BINARY)-darwin-amd64 $(BINARY)-darwin-arm64 $(BINARY)-windows-amd64.exe $(BINARY)-windows-arm64.exe
