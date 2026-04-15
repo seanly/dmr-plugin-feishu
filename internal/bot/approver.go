@@ -438,19 +438,32 @@ func formatBatchCommandLine(index int, tool, argsJSON string, contentMaxRunes in
 		return b.String()
 	}
 	switch tool {
-	case "shell":
+	case "shell", "powershell":
 		cmd, _ := args["cmd"].(string)
 		fmt.Fprintf(&b, "`%s`\n\n", tool)
 		b.WriteString("```\n")
 		b.WriteString(truncateStringByRunes(cmd, contentMaxRunes))
 		b.WriteString("\n```")
+		delete(args, "cmd")
+		if len(args) > 0 {
+			b.WriteString("\n")
+			b.WriteString(formatRemainingJSONMarkdown(args, maxApprovalRestJSONRunes))
+		}
 	case "fsWrite", "fsEdit":
 		path, _ := args["path"].(string)
 		fmt.Fprintf(&b, "`%s` — path: `%s`", tool, path)
+		delete(args, "path")
 		if c, ok := args["content"].(string); ok && c != "" {
 			b.WriteString("\n\n```\n")
 			b.WriteString(truncateStringByRunes(c, contentMaxRunes))
 			b.WriteString("\n```")
+			delete(args, "content")
+		}
+		if len(args) > 0 {
+			b.WriteString("\n")
+			for k, v := range args {
+				b.WriteString(fmt.Sprintf("\n- **%s:** `%v`", k, v))
+			}
 		}
 	default:
 		fmt.Fprintf(&b, "`%s`", tool)
